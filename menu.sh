@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Script Name   : RareTriccks Multi-Protocol VPN Panel (Direct SSL & Split Menus)
+# Version       : 2026-09-05-direct-ssl-fixed-v2
 # Ports         : 80 (Plain), 443 (Direct SSL & Nginx SNI Multiplexing), 7300 (BadVPN UDPGW)
 # ==============================================================================
 
@@ -13,7 +14,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 PANEL_NAME="RareTriccks VPN Panel (Direct SSL Edition)"
-PANEL_VERSION="2026-09-05-direct-ssl-fixed"
+PANEL_VERSION="2026-09-05-direct-ssl-fixed-v2"
 BANNER_FILE="/etc/issue.net"
 DOMAIN_FILE="/etc/raretriccks/domain.conf"
 WILDCARD_FILE="/etc/raretriccks/wildcard.conf"
@@ -48,6 +49,7 @@ V2RAY_GRPC_SERVICE="vless-grpc"
 XRAY_CERT_DIR="/etc/xray/certs"
 XRAY_CERT_FILE="${XRAY_CERT_DIR}/fullchain.pem"
 XRAY_KEY_FILE="${XRAY_CERT_DIR}/privkey.pem"
+XRAY_SVC_USER="xray"
 
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}[ERROR] Yeh script ROOT privilege ke sath chalaen! (sudo -i)${NC}"
@@ -109,7 +111,7 @@ install_badvpn_udpgw() {
             fi
             if [[ -d /tmp/badvpn ]]; then
                 mkdir -p /tmp/badvpn/build
-                cd /tmp/badvpn/build
+                cd /tmp/badvpn/build || exit
                 cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 &>/dev/null
                 make install &>/dev/null || true
                 cd ~
@@ -716,8 +718,9 @@ NGINX_EOF
     if [[ "$HAVE_SSL" -eq 1 ]]; then
 cat << NGINX_EOF >> "$NGINX_CONF"
 server {
-    listen 8443 ssl http2;
-    listen [::]:8443 ssl http2;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    http2 on;
     server_name ${MY_DOMAIN};
 
     ssl_certificate /etc/letsencrypt/live/${CERT_DOM}/fullchain.pem;
@@ -771,7 +774,12 @@ stream {
 }
 STREAM_EOF
         if ! grep -q "include $NGINX_STREAM_CONF;" /etc/nginx/nginx.conf; then
-            echo "include $NGINX_STREAM_CONF;" >> /etc/nginx/nginx.conf
+            # Inject stream block safely before the last closing brace or at the top level
+            if grep -q "http {" /etc/nginx/nginx.conf; then
+                sed -i '0,/http {/{s/http {/include '"$NGINX_STREAM_CONF"';\n\nhttp {/}}' /etc/nginx/nginx.conf
+            else
+                echo "include $NGINX_STREAM_CONF;" >> /etc/nginx/nginx.conf
+            fi
         fi
     fi
 
@@ -829,8 +837,8 @@ cat << 'EOF' > $BANNER_FILE
 EOF
 
     fix_dropbear_core
-    sed -i 's/#Banner none/Banner \/etc\/issue.net/g' /etc/ssh/sshd_config
-    systemctl restart ssh
+    sed -i 's/#Banner none/Banner \/etc\/issue.net/g' /etc/ssh/sshd_config 2>/dev/null || true
+    systemctl restart ssh 2>/dev/null || true
 
     echo -e "${BLUE}[4/8] Installing BadVPN UDP Gateway...${NC}"
     install_badvpn_udpgw
@@ -944,9 +952,6 @@ EOF
     press_any_key
 }
 
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
-XRAY_SVC_USER="xray-svc"
-
 install_xray_core() {
     if ! command -v xray &>/dev/null; then
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -958,8 +963,13 @@ install_xray_core() {
 }
 
 fix_xray_service_user() {
-    if ! id "$XRAY_SVC_USER" &>/dev/null; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin "$XRAY_SVC_USER" 2>/dev/null
+    # Check current system xray user or fallback safely
+    if id "xray" &>/dev/null; then
+        XRAY_SVC_USER="xray"
+    elif id "nobody" &>/dev/null; then
+        XRAY_SVC_USER="nobody"
+    else
+        XRAY_SVC_USER="root"
     fi
 
     local unit="/etc/systemd/system/xray.service"
@@ -968,11 +978,6 @@ fix_xray_service_user() {
             sed -i "s/^User=.*/User=${XRAY_SVC_USER}/" "$unit"
         else
             sed -i "/\[Service\]/a User=${XRAY_SVC_USER}" "$unit"
-        fi
-        if grep -q '^Group=' "$unit"; then
-            sed -i "s/^Group=.*/Group=${XRAY_SVC_USER}/" "$unit"
-        else
-            sed -i "/\[Service\]/a Group=${XRAY_SVC_USER}" "$unit"
         fi
         systemctl daemon-reload
     fi
@@ -988,7 +993,7 @@ configure_xray() {
     local KEY_FILE="$XRAY_KEY_FILE"
 
     mkdir -p /var/log/xray
-    chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || chown -R nobody:nogroup /var/log/xray
+    chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || true
 
 cat << XR_EOF > "$XRAY_CONFIG"
 {
@@ -1152,7 +1157,7 @@ v2ray_add_user() {
     mkdir -p "$V2USERS_DIR"
     local expire_date="Unlimited"
     if [[ "$exp_days" =~ ^[0-9]+$ && "$exp_days" -gt 0 ]]; then
-        expire_date=$(date -d "+${exp_days} days" +"%Y-%m-%d")
+        expire_date=$(date -d "+${exp_days} days" +"%Y-%m-%d" 2>/dev/null || date -v+${exp_days}d +"%Y-%m-%d")
     fi
 
 cat << V2_EOF > "${V2USERS_DIR}/${uname}.conf"
@@ -1286,7 +1291,9 @@ v2ray_modify_limits() {
     if [[ "$newdays" == "0" ]]; then
         sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=Unlimited/" "$conf"
     else
-        sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=$(date -d "+$newdays days" +"%Y-%m-%d")/" "$conf"
+        local new_exp
+        new_exp=$(date -d "+$newdays days" +"%Y-%m-%d" 2>/dev/null || date -v+${newdays}d +"%Y-%m-%d")
+        sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=${new_exp}/" "$conf"
     fi
     v2ray_unlock_user "$uname"
     echo -e "${GREEN}[SUCCESS] V2Ray account updated & unlocked.${NC}"
@@ -1332,7 +1339,9 @@ ssh_add_user_flow() {
         return
     fi
 
-    useradd -e "$(date -d "+$sd days" +"%Y-%m-%d")" -s /bin/bash -m "$su"
+    local exp_date
+    exp_date=$(date -d "+$sd days" +"%Y-%m-%d" 2>/dev/null || date -v+${sd}d +"%Y-%m-%d")
+    useradd -e "$exp_date" -s /bin/bash -m "$su" 2>/dev/null || useradd -s /bin/bash -m "$su"
     echo -e "$sp\n$sp" | passwd "$su" &>/dev/null
 
     mkdir -p "$USERS_DIR"
@@ -1396,7 +1405,7 @@ ssh_check_online_ips() {
     ps aux | grep '[d]ropbear'
     echo ""
     echo -e "${BLUE}Recent SSH Auth Logins (Real IP from Pakistan / Client):${NC}"
-    journalctl -u dropbear --no-pager -n 40 | grep "Password auth succeeded"
+    journalctl -u dropbear --no-pager -n 40 2>/dev/null | grep "Password auth succeeded" || echo "No dropbear logs available via journalctl."
     echo -e "${CYAN}====================================================${NC}"
     press_any_key
 }
@@ -1421,9 +1430,11 @@ ssh_modify_limits() {
     fi
 
     if [[ "$newdays" == "0" ]]; then
-        usermod -e "" "$uname"
+        usermod -e "" "$uname" 2>/dev/null || true
     else
-        usermod -e "$(date -d "+$newdays days" +"%Y-%m-%d")" "$uname"
+        local new_exp
+        new_exp=$(date -d "+$newdays days" +"%Y-%m-%d" 2>/dev/null || date -v+${newdays}d +"%Y-%m-%d")
+        usermod -e "$new_exp" "$uname" 2>/dev/null || true
     fi
     passwd -u "$uname" &>/dev/null
     echo -e "${GREEN}[SUCCESS] SSH user limits updated & account unlocked.${NC}"
@@ -1531,7 +1542,7 @@ while true; do
     echo -e " Domain Target: ${YELLOW}${CURRENT_DOM}${NC}"
     echo -e "${CYAN}----------------------------------------------------${NC}"
     echo -e " 1) Auto Install System Components (BadVPN Built-in)"
-    echo -e " 2) Add / Change Domain Name"
+    echo -e " 2) Add / Change Domain Name Main Menu"
     echo -e " 3) Issue SSL Certificate (Let's Encrypt)"
     echo -e " 4) SSH / Direct SSL Management Menu"
     echo -e " 5) V2Ray / Xray Management Menu"
