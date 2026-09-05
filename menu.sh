@@ -13,7 +13,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 PANEL_NAME="RareTriccks VPN Panel (Direct SSL Edition)"
-PANEL_VERSION="2026-09-05-direct-ssl"
+PANEL_VERSION="2026-09-05-direct-ssl-fixed"
 BANNER_FILE="/etc/issue.net"
 DOMAIN_FILE="/etc/raretriccks/domain.conf"
 WILDCARD_FILE="/etc/raretriccks/wildcard.conf"
@@ -164,7 +164,7 @@ fix_dropbear_core() {
 cat << 'EOF' > /etc/default/dropbear
 NO_START=0
 DROPBEAR_PORT=22
-DROPBEAR_EXTRA_ARGS="-p 109 -p 447 -p 443 -b /etc/issue.net"
+DROPBEAR_EXTRA_ARGS="-p 109 -p 447 -b /etc/issue.net"
 DROPBEAR_BANNER="/etc/issue.net"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
@@ -1091,24 +1091,24 @@ v2ray_inject_client() {
     backup=$(mktemp)
     cp "$XRAY_CONFIG" "$backup"
 
-    for tag in ws-tls-in ws-plain-in xhttp-in tcp-plain-in tcp-tls-in grpc-in; do
-        tmp=$(mktemp)
-        jq --arg tag "$tag" --arg id "$uuid" --arg email "$uname" \
-           '(.inbounds[] | select(.tag==$tag) | .settings.clients) += [{"id": $id, "email": $email}]' \
-           "$XRAY_CONFIG" > "$tmp"
-        if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-            mv "$tmp" "$XRAY_CONFIG"
-        else
-            rm -f "$tmp"
-            cp "$backup" "$XRAY_CONFIG"
-            rm -f "$backup"
-            return 1
-        fi
-    done
-    chmod 644 "$XRAY_CONFIG"
-    rm -f "$backup"
-    timeout 15 systemctl restart xray
-    return 0
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$uuid" --arg email "$uname" \
+       '(.inbounds[].settings.clients) |= if . != null then . + [{"id": $id, "email": $email}] else . end' \
+       "$XRAY_CONFIG" > "$tmp"
+
+    if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
+        mv "$tmp" "$XRAY_CONFIG"
+        chmod 644 "$XRAY_CONFIG"
+        rm -f "$backup"
+        timeout 15 systemctl restart xray
+        return 0
+    else
+        rm -f "$tmp"
+        cp "$backup" "$XRAY_CONFIG"
+        rm -f "$backup"
+        return 1
+    fi
 }
 
 v2ray_strip_client() {
@@ -1117,19 +1117,24 @@ v2ray_strip_client() {
     backup=$(mktemp)
     cp "$XRAY_CONFIG" "$backup"
 
+    local tmp
     tmp=$(mktemp)
     jq --arg email "$uname" \
-       '(.inbounds[].settings.clients) |= map(select(.email != $email))' \
+       '(.inbounds[].settings.clients) |= if . != null then map(select(.email != $email)) else . end' \
        "$XRAY_CONFIG" > "$tmp"
+
     if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
         mv "$tmp" "$XRAY_CONFIG"
+        chmod 644 "$XRAY_CONFIG"
+        rm -f "$backup"
+        timeout 15 systemctl restart xray
+        return 0
     else
-        rm -f "$tmp" "$backup"
+        rm -f "$tmp"
+        cp "$backup" "$XRAY_CONFIG"
+        rm -f "$backup"
         return 1
     fi
-    chmod 644 "$XRAY_CONFIG"
-    rm -f "$backup"
-    timeout 15 systemctl restart xray
 }
 
 v2ray_add_user() {
@@ -1344,7 +1349,7 @@ U_EOF
     echo -e "${CYAN}Password         : ${sp}${NC}"
     echo -e "${CYAN}Host/IP          : ${MY_DOMAIN}${NC}"
     echo -e "${CYAN}Direct SSL Port  : 443 (No Payload Required / Stunnel compatible)${NC}"
-    echo -e "${CYAN}Dropbear Port    : 109 / 22 / 447${NC}"
+    echo -e "${CYAN}Dropbear Port    : 109 / 447${NC}"
     echo -e "${CYAN}WS Port          : 80 / 8443 (via Nginx -> 2082)${NC}"
     echo -e "${CYAN}BadVPN Port      : 127.0.0.1:${BADVPN_PORT}${NC}"
     echo -e "${CYAN}====================================================${NC}"
@@ -1464,8 +1469,8 @@ setup_ssl() {
     echo -e "${YELLOW}  ${PANEL_NAME} - ISSUING SSL (${current_dom}) ${NC}"
     echo -e "${CYAN}====================================================${NC}"
 
-    systemctl stop nginx 2>/dev/null
-    certbot certonly --standalone --preferred-challenges http --agree-tos --register-unsafely-without-email -d "$current_dom"
+    mkdir -p /var/www/html
+    certbot certonly --webroot -w /var/www/html --agree-tos --register-unsafely-without-email -d "$current_dom" --non-interactive
 
     if [[ -f "/etc/letsencrypt/live/$current_dom/fullchain.pem" ]]; then
         echo -e "\n${GREEN}[SUCCESS] SSL Active for ${current_dom}!${NC}"
@@ -1528,7 +1533,7 @@ while true; do
     echo -e " 1) Auto Install System Components (BadVPN Built-in)"
     echo -e " 2) Add / Change Domain Name"
     echo -e " 3) Issue SSL Certificate (Let's Encrypt)"
-    echo -e " 4) SSH / Direct SSL / WS Management Menu"
+    echo -e " 4) SSH / Direct SSL Management Menu"
     echo -e " 5) V2Ray / Xray Management Menu"
     echo -e " 6) SlowDNS Management (SSH over DNS)"
     echo -e " 7) Check Status & Service Ports"
