@@ -835,7 +835,7 @@ EOF
     echo -e "${BLUE}[4/8] Installing BadVPN UDP Gateway...${NC}"
     install_badvpn_udpgw
 
-    echo -e "${BLUE}[5/8] Creating Python WebSocket Service...${NC}"
+    echo -e "${BLUE}[5/8] Creating Python WebSocket Service (Split & Buffer Fixed)...${NC}"
 cat << 'EOF' > /usr/local/bin/ws-proxy.py
 import socket, threading, select, time
 
@@ -855,7 +855,7 @@ def handle_client(client_socket, client_addr):
     real_ip = client_addr[0]
     try:
         client_socket.settimeout(10)
-        request_raw = client_socket.recv(4096)
+        request_raw = client_socket.recv(8192)
         if not request_raw:
             client_socket.close()
             return
@@ -889,7 +889,10 @@ def handle_client(client_socket, client_addr):
     except Exception:
         pass
     finally:
-        client_socket.close()
+        try: client_socket.close()
+        except: pass
+        try: target_socket.close()
+        except: pass
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1186,9 +1189,13 @@ v2ray_unlock_user() {
 }
 
 v2ray_list_users() {
-    jq -r '.inbounds[] | select(.tag=="ws-tls-in") | .settings.clients[]? | "\(.email)  ->  \(.id)"' "$XRAY_CONFIG" 2>/dev/null
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}           V2RAY ACCOUNTS & USAGE INFO             ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    jq -r '.inbounds[] | select(.tag=="ws-tls-in") | .settings.clients[]? | "User: \(.email) | UUID: \(.id)"' "$XRAY_CONFIG" 2>/dev/null
     if [[ -d "$V2USERS_DIR" ]]; then
-        echo -e "\n${CYAN}--- Limits / Quota (V2Ray Users) ---${NC}"
+        echo -e "\n${CYAN}--- Limits & Bandwidth Usage (V2Ray Users) ---${NC}"
         for f in "${V2USERS_DIR}"/*.conf; do
             [[ -e "$f" ]] || continue
             local uname ip gb used exp locked
@@ -1198,9 +1205,10 @@ v2ray_list_users() {
             used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
             exp=$(grep '^EXPIRE_DATE=' "$f" | cut -d= -f2)
             locked=$(grep '^LOCKED=' "$f" | cut -d= -f2)
-            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRE=${exp} LOCKED=${locked}"
+            echo -e " User: ${uname} | IP Limit: ${ip} | GB Limit: ${gb} | Used: ${used} MB | Expiry: ${exp} | Locked: ${locked}"
         done
     fi
+    press_any_key
 }
 
 v2ray_add_user_flow() {
@@ -1288,7 +1296,7 @@ v2ray_menu() {
         echo -e "${CYAN}====================================================${NC}"
         echo -e " 1) Add V2Ray User"
         echo -e " 2) Delete V2Ray User"
-        echo -e " 3) List V2Ray Users & Usage"
+        echo -e " 3) List V2Ray Accounts & GB Limits"
         echo -e " 4) Check V2Ray Connected Real IPs"
         echo -e " 5) Extend / Modify Limits (IP / GB / Expiry)"
         echo -e " 6) Back to Main Menu"
@@ -1297,7 +1305,7 @@ v2ray_menu() {
         case $v_opt in
             1) v2ray_add_user_flow ;;
             2) v2ray_delete_user_flow ;;
-            3) clear; v2ray_list_users; press_any_key ;;
+            3) v2ray_list_users ;;
             4) v2ray_check_online_ips ;;
             5) v2ray_modify_limits ;;
             6) return ;;
@@ -1353,7 +1361,9 @@ ssh_delete_user_flow() {
 
 ssh_list_users() {
     clear
-    echo -e "${CYAN}--- Active SSH Users & Limits ---${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}           SSH ACCOUNTS & USAGE INFO               ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
     if [[ -d "$USERS_DIR" ]]; then
         for f in "${USERS_DIR}"/*.conf; do
             [[ -e "$f" ]] || continue
@@ -1364,7 +1374,7 @@ ssh_list_users() {
             used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
             exp=$(chage -l "$uname" 2>/dev/null | grep "Account expires" | awk -F': ' '{print $2}')
             lockstat=$(passwd -S "$uname" 2>/dev/null | awk '{print $2}')
-            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRES=${exp:-N/A} STATUS=${lockstat:-N/A}"
+            echo -e " User: ${uname} | IP Limit: ${ip} | GB Limit: ${gb} | Used: ${used} MB | Expires: ${exp:-N/A} | Status: ${lockstat:-N/A}"
         done
     else
         echo "No SSH users found."
@@ -1388,7 +1398,7 @@ ssh_check_online_ips() {
 
 ssh_modify_limits() {
     clear
-    echo -e "${CYAN}--- Extend / Modify SSH Limits & Limits ---${NC}"
+    echo -e "${CYAN}--- Extend / Modify SSH Limits ---${NC}"
     read -rp "Username: " uname
     if ! id "$uname" &>/dev/null; then
         echo -e "${RED}[ERROR] User not found!${NC}"
@@ -1423,8 +1433,8 @@ ssh_menu() {
         echo -e "${CYAN}====================================================${NC}"
         echo -e " 1) Add SSH Account (Direct SSL 443 + WS)"
         echo -e " 2) Delete SSH Account"
-        echo -e " 3) List SSH Accounts & Limits"
-        echo -e " 4) Check Connected Real IPs (Pakistan/Client)"
+        echo -e " 3) List SSH Accounts & GB Limits"
+        echo -e " 4) Check SSH Connected Real IPs"
         echo -e " 5) Extend / Modify Limits (IP / GB / Expiry)"
         echo -e " 6) Back to Main Menu"
         echo -e "${CYAN}====================================================${NC}"
@@ -1518,8 +1528,8 @@ while true; do
     echo -e " 1) Auto Install System Components (BadVPN Built-in)"
     echo -e " 2) Add / Change Domain Name"
     echo -e " 3) Issue SSL Certificate (Let's Encrypt)"
-    echo -e " 4) SSH / Direct SSL (Port 443) / WS Management"
-    echo -e " 5) V2Ray / Xray Management"
+    echo -e " 4) SSH / Direct SSL / WS Management Menu"
+    echo -e " 5) V2Ray / Xray Management Menu"
     echo -e " 6) SlowDNS Management (SSH over DNS)"
     echo -e " 7) Check Status & Service Ports"
     echo -e " 8) Uninstall Panel"
