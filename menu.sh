@@ -20,7 +20,7 @@ WILDCARD_FILE="/etc/raretriccks/wildcard.conf"
 USERS_DIR="/etc/raretriccks/users"
 V2USERS_DIR="/etc/raretriccks/v2users"
 NGINX_CONF="/etc/nginx/conf.d/raretriccks.conf"
-NGINX_STREAM_CONF="/etc/nginx/conf.d/raretriccks_stream.conf"
+NGINX_STREAM_CONF="/etc/nginx/raretriccks_stream.conf"
 XRAY_ACCESS_LOG="/var/log/xray/access.log"
 XRAY_API_ADDR="127.0.0.1:10085"
 SLOWDNS_DIR="/etc/slowdns"
@@ -770,7 +770,9 @@ stream {
     }
 }
 STREAM_EOF
-        grep -q "include $NGINX_STREAM_CONF;" /etc/nginx/nginx.conf || sed -i "/http {/i include $NGINX_STREAM_CONF;\n" /etc/nginx/nginx.conf
+        if ! grep -q "include $NGINX_STREAM_CONF;" /etc/nginx/nginx.conf; then
+            echo "include $NGINX_STREAM_CONF;" >> /etc/nginx/nginx.conf
+        fi
     fi
 
     nginx -t &>/tmp/nginx_check.log
