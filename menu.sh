@@ -1012,6 +1012,15 @@ configure_xray() {
     mkdir -p /var/log/xray
     chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || chown -R nobody:nogroup /var/log/xray
 
+    # IMPORTANT: back up the live config BEFORE overwriting it - this is what already-added
+    # V2Ray clients live in. Without this, re-running SSL setup (or install) wipes every
+    # user's UUID out of Xray, which looks exactly like "V2Ray TLS won't connect" afterwards.
+    local OLD_XRAY_BACKUP=""
+    if [[ -s "$XRAY_CONFIG" ]]; then
+        OLD_XRAY_BACKUP=$(mktemp)
+        cp "$XRAY_CONFIG" "$OLD_XRAY_BACKUP"
+    fi
+
 cat << XR_EOF > "$XRAY_CONFIG"
 {
   "log": { "loglevel": "warning", "access": "${XRAY_ACCESS_LOG}" },
@@ -1098,6 +1107,25 @@ XR_EOF
         else
             rm -f "$tmp"
         fi
+        chmod 644 "$XRAY_CONFIG"
+    fi
+
+    if [[ -n "$OLD_XRAY_BACKUP" && -s "$OLD_XRAY_BACKUP" ]]; then
+        for tag in ws-tls-in ws-plain-in xhttp-in tcp-plain-in tcp-tls-in grpc-in; do
+            local old_clients
+            old_clients=$(jq -c --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag) | .settings.clients[]?]' "$OLD_XRAY_BACKUP" 2>/dev/null)
+            [[ -z "$old_clients" || "$old_clients" == "null" ]] && old_clients="[]"
+            tmp=$(mktemp)
+            jq --arg tag "$tag" --argjson oc "$old_clients" \
+               '(.inbounds[] | select(.tag==$tag) | .settings.clients) = $oc' \
+               "$XRAY_CONFIG" > "$tmp"
+            if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
+                mv "$tmp" "$XRAY_CONFIG"
+            else
+                rm -f "$tmp"
+            fi
+        done
+        rm -f "$OLD_XRAY_BACKUP"
         chmod 644 "$XRAY_CONFIG"
     fi
 
