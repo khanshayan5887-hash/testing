@@ -1,7 +1,8 @@
 #!/bin/bash
+
 # ==============================================================================
-# Script Name   : RareTriccks Multi-Protocol VPN Panel (Auth Fixed Edition)
-# Ports         : 80 (Plain), 443 (TLS), 7300 (BadVPN UDPGW)
+# Script Name   : RareTriccks VPN Panel (OpenSSH & Dynamic Domain Supported)
+# Custom Path   : /raretriccks
 # ==============================================================================
 
 RED='\033[0;31m'
@@ -12,32 +13,15 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-PANEL_NAME="RareTriccks VPN Panel (Auth Fixed)"
-PANEL_VERSION="2026-08-31-fixed"
+PANEL_NAME="RareTriccks VPN Panel"
 BANNER_FILE="/etc/issue.net"
+CUSTOM_PATH="/raretriccks"
 DOMAIN_FILE="/etc/raretriccks/domain.conf"
-WILDCARD_FILE="/etc/raretriccks/wildcard.conf"
-USERS_DIR="/etc/raretriccks/users"
-V2USERS_DIR="/etc/raretriccks/v2users"
-NGINX_CONF="/etc/nginx/conf.d/raretriccks.conf"
-XRAY_ACCESS_LOG="/var/log/xray/access.log"
-XRAY_API_ADDR="127.0.0.1:10085"
-SLOWDNS_DIR="/etc/slowdns"
-SLOWDNS_PRIVKEY="${SLOWDNS_DIR}/server.key"
-SLOWDNS_PUBKEY="${SLOWDNS_DIR}/server.pub"
-SLOWDNS_NS_FILE="${SLOWDNS_DIR}/ns_domain.conf"
-SLOWDNS_BIN="/usr/local/bin/dns-server"
-SLOWDNS_UDP_PORT=53
-SLOWDNS_FORWARD_HOST="127.0.0.1"
-SLOWDNS_FORWARD_PORT=109
 
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}[ERROR] Yeh script ROOT privilege ke sath chalaen! (sudo -i)${NC}"
    exit 1
 fi
-
-mesg n 2>/dev/null
-true
 
 get_domain() {
     if [[ -f "$DOMAIN_FILE" ]]; then
@@ -47,359 +31,46 @@ get_domain() {
     fi
 }
 
-get_cert_domain() {
-    if [[ -s "$WILDCARD_FILE" ]]; then
-        cat "$WILDCARD_FILE" | tr -d '\r\n'
-    else
-        get_domain
-    fi
-}
-
 press_any_key() {
     echo -e "\n${YELLOW}Press [ENTER] key to return to main menu...${NC}"
     read -r
 }
 
-wait_for_port() {
-    local host="$1"
-    local port="$2"
-    local label="$3"
-    local timeout="${4:-15}"
-    local waited=0
+fix_openssh_core() {
+    apt-get install -y openssh-server
 
-    while ! (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; do
-        sleep 1
-        waited=$((waited+1))
-        if [[ $waited -ge $timeout ]]; then
-            echo -e "${RED}[WARN] ${label} (${host}:${port}) did not come up after ${timeout}s${NC}" >&2
-            return 1
-        fi
-    done
-    exec 3>&- 2>/dev/null
-    echo -e "${GREEN}[OK] ${label} listening on ${host}:${port}${NC}" >&2
-    return 0
-}
-
-install_badvpn_udpgw() {
-    echo -e "${BLUE}[+] Installing & Auto-Starting BadVPN UDP Gateway for Gaming & Calls...${NC}"
-    
-    if [[ ! -f /usr/local/bin/badvpn-udpgw ]]; then
-        wget -O /usr/local/bin/badvpn-udpgw https://github.com/ambrop72/badvpn/raw/master/udpgw/badvpn-udpgw 2>/dev/null || true
-        if [[ ! -f /usr/local/bin/badvpn-udpgw ]]; then
-            apt install -y cmake build-essential libssl-dev git &>/dev/null || true
-            if [[ ! -d /tmp/badvpn ]]; then
-                git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn &>/dev/null || true
-            fi
-            if [[ -d /tmp/badvpn ]]; then
-                mkdir -p /tmp/badvpn/build
-                cd /tmp/badvpn/build
-                cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 &>/dev/null
-                make install &>/dev/null || true
-                cd ~
-            fi
-        fi
-    fi
-
-    if [[ -f /usr/local/bin/badvpn-udpgw ]]; then
-        chmod +x /usr/local/bin/badvpn-udpgw
-    fi
-
-cat << 'EOF' > /etc/systemd/system/badvpn.service
-[Unit]
-Description=BadVPN UDP Gateway for Gaming & Voice Calls
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections 2000
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    cat << 'SSH_CONF' > /etc/ssh/sshd_config
+Port 22
+Port 109
+Port 447
+Protocol 2
+Banner /etc/issue.net
+PermitRootLogin yes
+PasswordAuthentication yes
+X11Forwarding no
+Subsystem sftp /usr/lib/openssh/sftp-server
+SSH_CONF
 
     systemctl daemon-reload
-    systemctl enable badvpn
-    systemctl restart badvpn
-    wait_for_port 127.0.0.1 7300 "BadVPN UDPGW (7300)" 5 || true
-}
-
-fix_dropbear_core() {
-    mkdir -p /etc/dropbear
-    chmod 700 /etc/dropbear
-
-    grep -qxF "/bin/bash" /etc/shells || echo "/bin/bash" >> /etc/shells
-    grep -qxF "/usr/sbin/nologin" /etc/shells || echo "/usr/sbin/nologin" >> /etc/shells
-
-    if [[ ! -f /etc/dropbear/dropbear_rsa_host_key ]]; then
-        dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key &>/dev/null
-    fi
-    if [[ ! -f /etc/dropbear/dropbear_ecdsa_host_key ]]; then
-        dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key &>/dev/null
-    fi
-    if [[ ! -f /etc/dropbear/dropbear_ed25519_host_key ]]; then
-        dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key &>/dev/null
-    fi
-
-    chmod 600 /etc/dropbear/*_host_key 2>/dev/null
-    rm -rf /etc/systemd/system/dropbear.service.d
-
-cat << 'EOF' > /etc/default/dropbear
-NO_START=0
-DROPBEAR_PORT=22
-DROPBEAR_EXTRA_ARGS="-p 109 -p 447 -b /etc/issue.net"
-DROPBEAR_BANNER="/etc/issue.net"
-DROPBEAR_RECEIVE_WINDOW=65536
-EOF
-
-    systemctl daemon-reload
-    systemctl enable dropbear
-    systemctl restart dropbear
-    wait_for_port 127.0.0.1 109 "Dropbear (109)" 10
-}
-
-get_ns_domain() {
-    if [[ -s "$SLOWDNS_NS_FILE" ]]; then
-        cat "$SLOWDNS_NS_FILE" | tr -d '\r\n'
-    else
-        echo ""
-    fi
-}
-
-# Port 53/UDP is almost always already held by systemd-resolved's stub listener.
-# This is the #1 reason SlowDNS "doesn't work" - free it before dns-server starts.
-free_port_53() {
-    if ss -uln 2>/dev/null | grep -q ':53 '; then
-        if systemctl is-active systemd-resolved &>/dev/null; then
-            mkdir -p /etc/systemd/resolved.conf.d
-            if grep -q '^DNSStubListener=' /etc/systemd/resolved.conf 2>/dev/null; then
-                sed -i 's/^DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-            else
-                echo 'DNSStubListener=no' >> /etc/systemd/resolved.conf
-            fi
-            systemctl restart systemd-resolved 2>/dev/null
-            sleep 1
-            rm -f /etc/resolv.conf
-            echo "nameserver 8.8.8.8" > /etc/resolv.conf
-            echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-        fi
-    fi
-
-    # Anything else still squatting on 53/udp (named, dnsmasq, etc.) - stop it too.
-    for svc in named bind9 dnsmasq; do
-        systemctl is-active "$svc" &>/dev/null && systemctl stop "$svc" 2>/dev/null && systemctl disable "$svc" 2>/dev/null
-    done
-}
-
-install_slowdns_binary() {
-    [[ -x "$SLOWDNS_BIN" ]] && return 0
-
-    echo -e "${BLUE}[+] Installing SlowDNS (dns-server) binary...${NC}"
-    apt install -y golang-go git build-essential &>/dev/null
-
-    if [[ ! -d /tmp/slowdns-src ]]; then
-        git clone https://github.com/sh4hin/SlowDNS.git /tmp/slowdns-src &>/dev/null || \
-        git clone https://github.com/eightbitlabs/slowdns.git /tmp/slowdns-src &>/dev/null || true
-    fi
-
-    if [[ -d /tmp/slowdns-src ]]; then
-        (
-            cd /tmp/slowdns-src || exit 1
-            go build -o "$SLOWDNS_BIN" . 2>/tmp/slowdns_build.log || \
-            go build -o "$SLOWDNS_BIN" ./server 2>>/tmp/slowdns_build.log || true
-        )
-    fi
-
-    if [[ ! -x "$SLOWDNS_BIN" ]]; then
-        echo -e "${RED}[ERROR] SlowDNS binary build nahi ho saka. /tmp/slowdns_build.log check karein.${NC}"
-        echo -e "${YELLOW}[HINT] Agar go-build fail ho raha hai, apne provider ka pre-built 'dns-server' binary manually /usr/local/bin/dns-server par daal kar chmod +x kar dein, phir yeh option dobara chalayen.${NC}"
-        return 1
-    fi
-    chmod +x "$SLOWDNS_BIN"
-    return 0
-}
-
-slowdns_generate_keys() {
-    mkdir -p "$SLOWDNS_DIR"
-    if [[ ! -f "$SLOWDNS_PRIVKEY" || ! -f "$SLOWDNS_PUBKEY" ]]; then
-        "$SLOWDNS_BIN" -gen-key -privkey-file "$SLOWDNS_PRIVKEY" -pubkey-file "$SLOWDNS_PUBKEY" &>/tmp/slowdns_keygen.log
-    fi
-    if [[ ! -f "$SLOWDNS_PRIVKEY" || ! -f "$SLOWDNS_PUBKEY" ]]; then
-        echo -e "${RED}[ERROR] SlowDNS keypair generate nahi ho saka.${NC}"
-        cat /tmp/slowdns_keygen.log 2>/dev/null
-        return 1
-    fi
-    chmod 600 "$SLOWDNS_PRIVKEY"
-    chmod 644 "$SLOWDNS_PUBKEY"
-    return 0
-}
-
-configure_slowdns_service() {
-    local ns_dom
-    ns_dom=$(get_ns_domain)
-    if [[ -z "$ns_dom" ]]; then
-        echo -e "${RED}[ERROR] NS Domain set nahi hai. Pehle SlowDNS menu se 'Set / Change NS Domain' use karein.${NC}"
-        return 1
-    fi
-
-    free_port_53
-
-cat << SD_EOF > /etc/systemd/system/slowdns.service
-[Unit]
-Description=SlowDNS (SSH over DNS) Tunnel Server
-After=network.target dropbear.service
-
-[Service]
-ExecStart=${SLOWDNS_BIN} -udp :${SLOWDNS_UDP_PORT} -privkey ${SLOWDNS_PRIVKEY} ${ns_dom} ${SLOWDNS_FORWARD_HOST}:${SLOWDNS_FORWARD_PORT}
-Restart=always
-RestartSec=3
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-SD_EOF
-
-    systemctl daemon-reload
-    systemctl enable slowdns &>/dev/null
-    systemctl restart slowdns
-
-    sleep 2
-    if ss -uln 2>/dev/null | grep -q ":${SLOWDNS_UDP_PORT} "; then
-        echo -e "${GREEN}[OK] SlowDNS UDP/${SLOWDNS_UDP_PORT} par listening hai.${NC}"
-    else
-        echo -e "${RED}[WARN] SlowDNS port ${SLOWDNS_UDP_PORT} par listen nahi kar raha. 'journalctl -u slowdns -n 50' check karein.${NC}"
-    fi
-}
-
-install_slowdns() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          SLOWDNS INSTALL / CONFIGURE              ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-
-    if [[ -z "$(get_ns_domain)" ]]; then
-        echo -e "${YELLOW}[INFO] NS Domain abhi set nahi hai, pehle wahi set karte hain.${NC}"
-        slowdns_set_ns_domain_flow
-    fi
-
-    if ! install_slowdns_binary; then
-        press_any_key
-        return 1
-    fi
-
-    if ! slowdns_generate_keys; then
-        press_any_key
-        return 1
-    fi
-
-    configure_slowdns_service
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-    echo -e "${GREEN}[SUCCESS] SlowDNS install/configure complete.${NC}"
-    echo -e "${YELLOW}[REMEMBER] SlowDNS wahi SSH/WS accounts (SSH Management se bane) use karta hai -${NC}"
-    echo -e "${YELLOW}           unhi ka GB/IP limit yahan bhi automatically apply hota hai.${NC}"
-    press_any_key
-}
-
-slowdns_set_ns_domain_flow() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          SET / CHANGE NS DOMAIN                   ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}[IMPORTANT] Yeh koi normal domain nahi hai - yeh ek NS (Nameserver) record hai.${NC}"
-    echo -e " Apne domain registrar/DNS panel me:"
-    echo -e "   1) Ek subdomain banayen, e.g. ${CYAN}ns.yourdomain.com${NC}"
-    echo -e "   2) Uske liye ek ${CYAN}NS record${NC} add karein jiski value ho: ${CYAN}dns.yourdomain.com${NC} (ya isi tarah ka glue domain)"
-    echo -e "   3) Us glue domain (${CYAN}dns.yourdomain.com${NC}) ke liye ek ${CYAN}A record${NC} add karein jo is server ki Public IP par point kare"
-    echo -e " Iske bina SlowDNS kabhi resolve nahi hoga, chahe service chal bhi rahi ho."
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-    read -rp "NS Subdomain enter karein (e.g. ns.yourdomain.com): " ns_input
-    if [[ -z "$ns_input" ]]; then
-        echo -e "${RED}[ERROR] NS domain khaali nahi ho sakta.${NC}"
-    else
-        mkdir -p "$SLOWDNS_DIR"
-        echo "$ns_input" > "$SLOWDNS_NS_FILE"
-        echo -e "${GREEN}[SUCCESS] NS Domain set to: ${CYAN}${ns_input}${NC}"
-        if [[ -f "$SLOWDNS_PRIVKEY" ]]; then
-            configure_slowdns_service
-        fi
-    fi
-    press_any_key
-}
-
-slowdns_show_info() {
-    clear
-    local ns_dom pubkey pubip
-    ns_dom=$(get_ns_domain)
-    pubkey=$(cat "$SLOWDNS_PUBKEY" 2>/dev/null)
-    pubip=$(curl -s ifconfig.me 2>/dev/null)
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          SLOWDNS CONNECTION INFO                  ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e " Service Status : $(systemctl is-active slowdns 2>/dev/null)"
-    echo -e " NS Domain      : ${ns_dom:-Not Set}"
-    echo -e " Server Public IP: ${pubip:-Unknown}"
-    echo -e " Public Key     : ${pubkey:-Not Generated}"
-    echo -e " UDP Port       : ${SLOWDNS_UDP_PORT}"
-    echo -e " Forwards To    : ${SLOWDNS_FORWARD_HOST}:${SLOWDNS_FORWARD_PORT} (Dropbear SSH)"
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-    echo -e "${YELLOW}Client apps (HTTP Injector / NapsternetV / etc.) me daalna hai:${NC}"
-    echo -e "  DNS Server / NS         : ${ns_dom:-<ns domain not set>}"
-    echo -e "  Public Key              : ${pubkey:-<not generated>}"
-    echo -e "  SSH Username/Password   : koi bhi SSH/WS account (SSH Management se bana hua)"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}[NOTE] GB/IP limits SlowDNS users ke liye alag se track nahi hote - ${NC}"
-    echo -e "${YELLOW}       wahi SSH account ke IP_LIMIT/GB_LIMIT (SSH Management me set) automatically apply hote hain,${NC}"
-    echo -e "${YELLOW}       kyunki SlowDNS traffic bhi isi Dropbear daemon ke through jaata hai.${NC}"
-    press_any_key
-}
-
-slowdns_menu() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          SLOWDNS MANAGEMENT                       ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e " 1) Install / Reinstall SlowDNS Server"
-    echo -e " 2) Set / Change NS Domain"
-    echo -e " 3) Show Public Key & Connection Info"
-    echo -e " 4) Restart SlowDNS Service"
-    echo -e " 5) Back"
-    echo -e "${CYAN}====================================================${NC}"
-    read -rp "Option [1-5]: " sd_opt
-    case $sd_opt in
-        1) install_slowdns ;;
-        2) slowdns_set_ns_domain_flow ;;
-        3) slowdns_show_info ;;
-        4)
-            free_port_53
-            systemctl restart slowdns 2>/dev/null
-            echo -e "${GREEN}[SUCCESS] SlowDNS service restart kar diya gaya.${NC}"
-            press_any_key
-            ;;
-        5) return ;;
-    esac
+    systemctl enable ssh
+    systemctl restart ssh
 }
 
 install_python_tracker() {
-cat << 'EOF' > /usr/local/bin/autokill.py
+    cat << 'PY_EOF' > /usr/local/bin/autokill.py
 import os
 import sys
 import time
 import subprocess
 import re
-import json
-import datetime
 
 USER_DIR = "/etc/raretriccks/users"
-V2USER_DIR = "/etc/raretriccks/v2users"
-XRAY_CONFIG = "/usr/local/etc/xray/config.json"
-XRAY_ACCESS_LOG = "/var/log/xray/access.log"
-XRAY_API_ADDR = "127.0.0.1:10085"
+LOG_FILE = "/var/log/autokill.log"
 
 def get_auth_logs():
     raw = ""
     try:
-        raw = subprocess.check_output(["journalctl", "-u", "dropbear", "--no-pager", "-n", "300"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+        raw = subprocess.check_output(["journalctl", "-u", "ssh", "--no-pager", "-n", "300"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
     except Exception:
         pass
     if os.path.exists("/var/log/auth.log"):
@@ -415,16 +86,14 @@ def get_active_users_and_pids(raw_logs):
     try:
         ps_out = subprocess.check_output(["ps", "aux"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
         for line in ps_out.splitlines():
-            if "dropbear" in line and "grep" not in line:
+            if "sshd:" in line and "grep" not in line:
                 parts = line.split()
                 if len(parts) > 1:
                     pid = parts[1]
-                    matches = [l for l in raw_logs.splitlines() if f"dropbear[{pid}]" in l and "Password auth succeeded" in l]
+                    matches = [l for l in raw_logs.splitlines() if f"sshd[{pid}]" in l and "Accepted" in l]
                     if matches:
                         last_line = matches[-1]
-                        m = re.search(r"for \x27(\w+)\x27", last_line)
-                        if not m:
-                            m = re.search(r"for (\w+)", last_line)
+                        m = re.search(r"Accepted \w+ for (\w+) from", last_line)
                         if m:
                             uname = m.group(1)
                             if uname not in user_pids:
@@ -448,150 +117,6 @@ def get_pid_io_bytes(pid):
     return total_bytes
 
 last_pid_bytes = {}
-
-
-def xray_strip_client(email):
-    """Remove a client (by email/username) from every inbound in the xray config, then restart."""
-    try:
-        with open(XRAY_CONFIG, "r") as f:
-            cfg = json.load(f)
-        changed = False
-        for ib in cfg.get("inbounds", []):
-            clients = ib.get("settings", {}).get("clients")
-            if clients:
-                new_clients = [c for c in clients if c.get("email") != email]
-                if len(new_clients) != len(clients):
-                    ib["settings"]["clients"] = new_clients
-                    changed = True
-        if changed:
-            with open(XRAY_CONFIG, "w") as f:
-                json.dump(cfg, f, indent=2)
-            subprocess.call(["systemctl", "restart", "xray"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-
-def get_v2ray_delta_mb(email):
-    """
-    Reads (and resets) the per-user traffic counter via xray's gRPC stats API.
-    Requires the 'api'/'stats'/'policy' blocks + api-in inbound added in configure_xray().
-    NOTE: exact CLI flags can differ slightly between xray-core releases -
-    verify with `xray api statsquery --help` on the target box if this stops matching.
-    """
-    total_bytes = 0
-    try:
-        out = subprocess.check_output(
-            ["xray", "api", "statsquery",
-             "--server=" + XRAY_API_ADDR,
-             "-pattern", "user>>>{}>>>traffic".format(email),
-             "-reset"],
-            stderr=subprocess.DEVNULL, timeout=5
-        ).decode("utf-8", errors="ignore")
-        data = json.loads(out)
-        for stat in data.get("stat", []):
-            try:
-                total_bytes += int(stat.get("value", 0))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return total_bytes / (1024.0 * 1024.0)
-
-
-def get_v2ray_active_ips(email, log_lines):
-    """Approximates 'currently connected' source IPs by scanning the recent xray access log tail."""
-    ips = set()
-    needle = "email: {}".format(email)
-    for line in log_lines:
-        if needle in line:
-            m = re.search(r"from (\d+\.\d+\.\d+\.\d+):", line)
-            if m:
-                ips.add(m.group(1))
-    return ips
-
-
-def process_v2ray_users():
-    if not os.path.exists(V2USER_DIR):
-        return
-
-    log_lines = []
-    try:
-        with open(XRAY_ACCESS_LOG, "r", errors="ignore") as f:
-            log_lines = f.readlines()[-1500:]
-    except Exception:
-        pass
-
-    for fname in os.listdir(V2USER_DIR):
-        if not fname.endswith(".conf"):
-            continue
-        uname = fname[:-5]
-        conf_path = os.path.join(V2USER_DIR, fname)
-
-        data = {}
-        try:
-            with open(conf_path, "r") as f:
-                lines = f.readlines()
-        except Exception:
-            continue
-
-        for line in lines:
-            line = line.strip()
-            if "=" in line:
-                k, v = line.split("=", 1)
-                data[k] = v
-
-        if data.get("LOCKED", "0") == "1":
-            # Already locked out - admin must extend limits / unlock via the panel menu
-            continue
-
-        ip_limit = 0
-        try:
-            ip_limit = int(data.get("IP_LIMIT", "0") or 0)
-        except Exception:
-            pass
-        gb_limit = data.get("GB_LIMIT", "Unlimited")
-        used_mb = 0.0
-        try:
-            used_mb = float(data.get("USED_MB", "0.0") or 0.0)
-        except Exception:
-            pass
-        expire_date = data.get("EXPIRE_DATE", "Unlimited")
-
-        delta_mb = get_v2ray_delta_mb(uname)
-        if delta_mb > 0:
-            used_mb += delta_mb
-
-        active_ips = get_v2ray_active_ips(uname, log_lines)
-
-        breach = False
-        if gb_limit != "Unlimited":
-            try:
-                if used_mb >= float(gb_limit) * 1024.0:
-                    breach = True
-            except Exception:
-                pass
-        if ip_limit > 0 and len(active_ips) > ip_limit:
-            breach = True
-        if expire_date != "Unlimited":
-            try:
-                exp = datetime.datetime.strptime(expire_date, "%Y-%m-%d").date()
-                if datetime.date.today() >= exp:
-                    breach = True
-            except Exception:
-                pass
-
-        data["USED_MB"] = "{:.2f}".format(used_mb)
-        if breach:
-            data["LOCKED"] = "1"
-            xray_strip_client(uname)
-
-        try:
-            with open(conf_path, "w") as f:
-                for k, v in data.items():
-                    f.write("{}={}\n".format(k, v))
-        except Exception:
-            pass
-
 
 while True:
     try:
@@ -657,16 +182,14 @@ while True:
                     for pid in active_pids:
                         subprocess.call(["kill", "-9", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        process_v2ray_users()
-
     except Exception:
         pass
 
     time.sleep(3)
-EOF
+PY_EOF
     chmod +x /usr/local/bin/autokill.py
 
-cat << 'EOF' > /etc/systemd/system/autokill.service
+    cat << 'SVC_EOF' > /etc/systemd/system/autokill.service
 [Unit]
 Description=RareTriccks Auto-Kill & Bandwidth Tracking Service
 After=network.target
@@ -677,136 +200,949 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVC_EOF
 
     systemctl daemon-reload
     systemctl enable autokill
     systemctl restart autokill
 }
 
-WS_SSH_PORT=2082          
-XRAY_WS_TLS_PORT=20001    
-XRAY_WS_PLAIN_PORT=20002  
-XRAY_GRPC_PORT=20005
-XRAY_XHTTP_PORT=8443
-XRAY_TCP_PLAIN_PORT=8880
-XRAY_TCP_TLS_PORT=8444
-BADVPN_PORT=7300
+install_tgbot_script() {
+    cat << 'PY_EOF' > /usr/local/bin/tgbot.py
+import os
+import re
+import json
+import asyncio
+import subprocess
+from datetime import datetime, timedelta
 
-V2RAY_WS_PATH="/v2ray"
-V2RAY_XHTTP_PATH="/vless-xhttp"
-V2RAY_GRPC_SERVICE="vless-grpc"
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters,
+)
 
-XRAY_CERT_DIR="/etc/xray/certs"
-XRAY_CERT_FILE="${XRAY_CERT_DIR}/fullchain.pem"
-XRAY_KEY_FILE="${XRAY_CERT_DIR}/privkey.pem"
+PANEL_NAME = "RareTriccks VPN Panel"
+CONFIG_FILE = "/etc/raretriccks/tgbot/config.json"
+ADMINS_FILE = "/etc/raretriccks/tgbot/admins.json"
+USERS_DIR = "/etc/raretriccks/users"
+DOMAIN_FILE = "/etc/raretriccks/domain.conf"
+BANNER_FILE = "/etc/issue.net"
 
-copy_xray_certs() {
-    local CERT_DOM=$(get_cert_domain)
-    mkdir -p "$XRAY_CERT_DIR"
-    if [[ -f "/etc/letsencrypt/live/${CERT_DOM}/fullchain.pem" && -f "/etc/letsencrypt/live/${CERT_DOM}/privkey.pem" ]]; then
-        cp "/etc/letsencrypt/live/${CERT_DOM}/fullchain.pem" "$XRAY_CERT_FILE"
-        cp "/etc/letsencrypt/live/${CERT_DOM}/privkey.pem" "$XRAY_KEY_FILE"
-        chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" "$XRAY_CERT_DIR" 2>/dev/null || chown -R nobody:nogroup "$XRAY_CERT_DIR"
-        chmod 750 "$XRAY_CERT_DIR"
-        chmod 640 "$XRAY_CERT_FILE" "$XRAY_KEY_FILE"
-        return 0
-    fi
-    return 1
-}
+NGINX_TEMPLATE = """server {{
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name {dom} _;
 
-configure_nginx_proxy() {
-    local MY_DOMAIN=$(get_domain)
-    local CERT_DOM=$(get_cert_domain)
-    local HAVE_SSL=0
-    
-    if [[ -f "/etc/letsencrypt/live/${CERT_DOM}/fullchain.pem" ]]; then
-        HAVE_SSL=1
-    fi
-
-    mkdir -p /etc/nginx/conf.d
-
-cat << NGINX_EOF > "$NGINX_CONF"
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${MY_DOMAIN};
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-
-    location ${V2RAY_WS_PATH} {
-        proxy_pass http://127.0.0.1:${XRAY_WS_PLAIN_PORT};
+    location / {{
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }}
 
-    location / {
-        proxy_pass http://127.0.0.1:${WS_SSH_PORT};
+    location /raretriccks {{
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-}
-NGINX_EOF
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }}
+}}
 
-    if [[ "$HAVE_SSL" -eq 1 ]]; then
-cat << NGINX_EOF >> "$NGINX_CONF"
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${MY_DOMAIN};
+server {{
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    server_name {dom} _;
 
-    ssl_certificate /etc/letsencrypt/live/${CERT_DOM}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${CERT_DOM}/privkey.pem;
-    
+    ssl_certificate /etc/letsencrypt/live/{dom}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{dom}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
 
-    location ${V2RAY_WS_PATH} {
-        proxy_pass http://127.0.0.1:${XRAY_WS_TLS_PORT};
+    location / {{
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }}
+
+    location /raretriccks {{
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }}
+}}
+"""
+
+FLOWS = {
+    "add_user": [
+        ("username", "\U0001F464 Username enter karein:"),
+        ("password", "\U0001F511 Password enter karein:"),
+        ("days", "\U0001F4C5 Expiry days enter karein (e.g. 30):"),
+        ("ip_limit", "\U0001F310 Max IP Limit enter karein (e.g. 1):"),
+        ("gb_limit", "\U0001F4BE Data Limit GB enter karein (e.g. 5, ya Unlimited):"),
+    ],
+    "del_user": [("username", "\U0001F464 Delete karne ke liye Username enter karein:")],
+    "renew_user": [
+        ("username", "\U0001F464 Username enter karein jise renew karna hai:"),
+        ("days", "\U0001F4C5 Kitne additional days add karne hain?"),
+    ],
+    "ip_limit": [
+        ("username", "\U0001F464 Username enter karein:"),
+        ("value", "\U0001F310 Naya IP Limit enter karein:"),
+    ],
+    "gb_limit": [
+        ("username", "\U0001F464 Username enter karein:"),
+        ("value", "\U0001F4BE Naya GB Limit enter karein:"),
+    ],
+    "domain": [("value", "\U0001F30D Naya domain enter karein (e.g. sub.example.com):")],
+    "banner": [("value", "\U0001F4E2 Naya SSH banner text bhejein:")],
+    "add_admin": [("value", "\U0001F451 Naye Admin ka Telegram User ID enter karein:")],
+    "remove_admin": [("value", "\U0001F5D1 Remove karne ke liye Admin ka Telegram User ID enter karein:")],
+}
+
+def load_config():
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
+
+def load_admins():
+    if not os.path.exists(ADMINS_FILE):
+        return []
+    with open(ADMINS_FILE) as f:
+        return json.load(f)
+
+def save_admins(admins):
+    with open(ADMINS_FILE, "w") as f:
+        json.dump(admins, f)
+
+def is_admin(uid):
+    return uid in load_admins()
+
+def is_super(uid):
+    cfg = load_config()
+    return uid == cfg.get("super_admin")
+
+def sh(cmd_list, input_data=None):
+    return subprocess.run(cmd_list, capture_output=True, text=True, input=input_data)
+
+def run(cmd_str):
+    return subprocess.run(cmd_str, shell=True, capture_output=True, text=True)
+
+def get_domain():
+    if os.path.exists(DOMAIN_FILE):
+        with open(DOMAIN_FILE) as f:
+            d = f.read().strip()
+            return d if d else "No Domain Set"
+    return "No Domain Set"
+
+def apply_nginx_config():
+    dom = get_domain()
+    if dom == "No Domain Set":
+        return
+    os.makedirs("/etc/nginx/conf.d", exist_ok=True)
+    with open("/etc/nginx/conf.d/vpn.conf", "w") as f:
+        f.write(NGINX_TEMPLATE.format(dom=dom))
+    sh(["rm", "-f", "/etc/nginx/sites-enabled/default"])
+    sh(["systemctl", "restart", "nginx"])
+
+def valid_username(u):
+    return re.match(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$", u) is not None
+
+def add_user(username, password, days, ip_limit, gb_limit):
+    if not valid_username(username):
+        return False, "Invalid username (letter se start, sirf a-z 0-9 _ - allowed)."
+    try:
+        exp_date = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d")
+    except ValueError:
+        return False, "Invalid days value."
+    r = sh(["useradd", "-M", "-s", "/bin/bash", "-e", exp_date, username])
+    if r.returncode != 0:
+        return False, (r.stderr.strip() or "User create failed (already exists?)")
+    sh(["chpasswd"], input_data=f"{username}:{password}\n")
+    os.makedirs(USERS_DIR, exist_ok=True)
+    with open(f"{USERS_DIR}/{username}.conf", "w") as f:
+        f.write(f"IP_LIMIT={ip_limit}\nGB_LIMIT={gb_limit}\nUSED_MB=0.0\n")
+    return True, exp_date
+
+def delete_user(username):
+    sh(["userdel", "-f", username])
+    try:
+        os.remove(f"{USERS_DIR}/{username}.conf")
+    except FileNotFoundError:
+        pass
+
+def renew_user(username, days):
+    r = sh(["id", username])
+    if r.returncode != 0:
+        return False
+    try:
+        new_exp = (datetime.now() + timedelta(days=int(days))).strftime("%Y-%m-%d")
+    except ValueError:
+        return False
+    sh(["usermod", "-e", new_exp, username])
+    sh(["passwd", "-u", username])
+    return True
+
+def update_conf_field(username, field, value):
+    path = f"{USERS_DIR}/{username}.conf"
+    if not os.path.exists(path):
+        return False
+    lines = open(path).readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        if line.startswith(f"{field}="):
+            new_lines.append(f"{field}={value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(f"{field}={value}\n")
+    with open(path, "w") as f:
+        f.writelines(new_lines)
+    sh(["passwd", "-u", username])
+    return True
+
+def list_users_text():
+    if not os.path.isdir(USERS_DIR):
+        return "Koi user nahi mila."
+    entries = []
+    for fname in sorted(os.listdir(USERS_DIR)):
+        if not fname.endswith(".conf"):
+            continue
+        uname = fname[:-5]
+        data = {}
+        for l in open(f"{USERS_DIR}/{fname}"):
+            if "=" in l:
+                k, v = l.strip().split("=", 1)
+                data[k] = v
+        exists = sh(["id", uname]).returncode == 0
+        status = "Deleted"
+        if exists:
+            p = sh(["passwd", "-S", uname])
+            status = "LOCKED" if " L " in f" {p.stdout} " else "Active"
+        used_mb = 0.0
+        try:
+            used_mb = float(data.get("USED_MB", "0") or 0)
+        except ValueError:
+            pass
+        used_gb = round(used_mb / 1024, 2)
+        entries.append(
+            f"\U0001F464 {uname} | IP:{data.get('IP_LIMIT', '?')} | "
+            f"Used:{used_gb}GB / {data.get('GB_LIMIT', '?')}GB | {status}"
+        )
+    return "\n".join(entries) if entries else "Koi user nahi mila."
+
+def connected_ips_text():
+    r = sh(["ss", "-tnp"])
+    lines = [l for l in r.stdout.splitlines() if (":109" in l or ":447" in l or ":22" in l) and "ESTAB" in l]
+    return f"\U0001F50C Active SSH/WS sessions (approx): {len(lines)}"
+
+def status_text():
+    def st(svc):
+        r = sh(["systemctl", "is-active", svc])
+        return "\U0001F7E2 ACTIVE" if r.stdout.strip() == "active" else "\U0001F534 INACTIVE"
+
+    dom = get_domain()
+    return (
+        f"\U0001F30D Domain: {dom}\n\n"
+        f"Nginx: {st('nginx')}\n"
+        f"OpenSSH: {st('ssh')}\n"
+        f"WS Proxy: {st('ws-proxy')}\n"
+        f"Auto-Kill: {st('autokill')}"
+    )
+
+def set_domain(new_domain):
+    os.makedirs("/etc/raretriccks", exist_ok=True)
+    with open(DOMAIN_FILE, "w") as f:
+        f.write(new_domain)
+    apply_nginx_config()
+
+def setup_ssl():
+    dom = get_domain()
+    if dom == "No Domain Set":
+        return False, "Pehle domain set karein."
+    sh(["systemctl", "stop", "nginx"])
+    r = sh([
+        "certbot", "certonly", "--standalone", "--preferred-challenges", "http",
+        "--agree-tos", "--register-unsafely-without-email", "-d", dom,
+    ])
+    ok = os.path.exists(f"/etc/letsencrypt/live/{dom}/fullchain.pem")
+    if ok:
+        apply_nginx_config()
+        return True, "SSL issued successfully."
+    return False, "SSL fail ho gaya. Domain A record VPS IP par pointed hai check karein."
+
+def fix_websocket():
+    sh(["systemctl", "restart", "ssh"])
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "restart", "ws-proxy"])
+    sh(["systemctl", "restart", "autokill"])
+    apply_nginx_config()
+    return "WebSocket & Bandwidth engine restarted."
+
+WS_PROXY_SRC = """import socket, threading, select, time
+
+PORT = 2082
+TARGET_HOST = '127.0.0.1'
+TARGET_PORT = 109
+LOG_FILE = '/var/log/ws-proxy.log'
+
+def log_client_ip(ip):
+    try:
+        with open(LOG_FILE, 'a') as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - REAL_IP:{ip}\\n")
+    except Exception:
+        pass
+
+def handle_client(client_socket, client_addr):
+    real_ip = client_addr[0]
+    try:
+        client_socket.settimeout(10)
+        request = client_socket.recv(4096).decode('utf-8', errors='ignore')
+        if not request:
+            client_socket.close()
+            return
+
+        for line in request.split('\\r\\n'):
+            if line.lower().startswith('x-forwarded-for:') or line.lower().startswith('x-real-ip:'):
+                real_ip = line.split(':')[1].strip().split(',')[0].strip()
+                break
+
+        log_client_ip(real_ip)
+
+        response = "HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n"
+        client_socket.sendall(response.encode('utf-8'))
+
+        target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        target_socket.connect((TARGET_HOST, TARGET_PORT))
+
+        sockets = [client_socket, target_socket]
+        client_socket.settimeout(None)
+
+        while True:
+            readable, _, _ = select.select(sockets, [], [])
+            for s in readable:
+                other = target_socket if s is client_socket else client_socket
+                data = s.recv(8192)
+                if not data:
+                    return
+                other.sendall(data)
+    except Exception:
+        pass
+    finally:
+        client_socket.close()
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(('0.0.0.0', PORT))
+server.listen(200)
+
+while True:
+    client, addr = server.accept()
+    threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+"""
+
+WS_PROXY_SERVICE = """[Unit]
+Description=RareTriccks WebSocket Proxy Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+AUTOKILL_SRC = """import os
+import subprocess
+import re
+import time
+
+USER_DIR = "/etc/raretriccks/users"
+
+def get_auth_logs():
+    raw = ""
+    try:
+        raw = subprocess.check_output(["journalctl", "-u", "ssh", "--no-pager", "-n", "300"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    if os.path.exists("/var/log/auth.log"):
+        try:
+            with open("/var/log/auth.log", "r", encoding="utf-8", errors="ignore") as f:
+                raw += "\\n" + f.read()
+        except Exception:
+            pass
+    return raw
+
+def get_active_users_and_pids(raw_logs):
+    user_pids = {}
+    try:
+        ps_out = subprocess.check_output(["ps", "aux"], stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+        for line in ps_out.splitlines():
+            if "sshd:" in line and "grep" not in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    pid = parts[1]
+                    matches = [l for l in raw_logs.splitlines() if f"sshd[{pid}]" in l and "Accepted" in l]
+                    if matches:
+                        last_line = matches[-1]
+                        m = re.search(r"Accepted \\w+ for (\\w+) from", last_line)
+                        if m:
+                            uname = m.group(1)
+                            if uname not in user_pids:
+                                user_pids[uname] = []
+                            user_pids[uname].append(pid)
+    except Exception:
+        pass
+    return user_pids
+
+def get_pid_io_bytes(pid):
+    io_file = f"/proc/{pid}/io"
+    total_bytes = 0
+    if os.path.exists(io_file):
+        try:
+            with open(io_file, "r") as f:
+                for line in f:
+                    if line.startswith("rchar:") or line.startswith("wchar:"):
+                        total_bytes += int(line.split(":")[1].strip())
+        except Exception:
+            pass
+    return total_bytes
+
+last_pid_bytes = {}
+
+while True:
+    try:
+        raw_logs = get_auth_logs()
+        user_pids_map = get_active_users_and_pids(raw_logs)
+
+        if os.path.exists(USER_DIR):
+            for fname in os.listdir(USER_DIR):
+                if not fname.endswith(".conf"):
+                    continue
+
+                uname = fname[:-5]
+                conf_path = os.path.join(USER_DIR, fname)
+
+                ip_limit = 0
+                gb_limit = "Unlimited"
+                used_mb = 0.0
+
+                with open(conf_path, "r") as f:
+                    lines = f.readlines()
+
+                for line in lines:
+                    if line.startswith("IP_LIMIT="):
+                        try: ip_limit = int(line.strip().split("=")[1])
+                        except Exception: pass
+                    elif line.startswith("GB_LIMIT="):
+                        gb_limit = line.strip().split("=")[1]
+                    elif line.startswith("USED_MB="):
+                        try: used_mb = float(line.strip().split("=")[1])
+                        except Exception: pass
+
+                active_pids = user_pids_map.get(uname, [])
+
+                for pid in active_pids:
+                    current_b = get_pid_io_bytes(pid)
+                    if pid in last_pid_bytes:
+                        diff = current_b - last_pid_bytes[pid]
+                        if diff > 0:
+                            used_mb += (diff / (1024.0 * 1024.0))
+                    last_pid_bytes[pid] = current_b
+
+                new_lines = []
+                for line in lines:
+                    if line.startswith("USED_MB="):
+                        new_lines.append(f"USED_MB={used_mb:.2f}\\n")
+                    else:
+                        new_lines.append(line)
+                with open(conf_path, "w") as f:
+                    f.writelines(new_lines)
+
+                if gb_limit != "Unlimited":
+                    try:
+                        max_mb = float(gb_limit) * 1024.0
+                        if used_mb >= max_mb:
+                            subprocess.call(["passwd", "-l", uname], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            for pid in active_pids:
+                                subprocess.call(["kill", "-9", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
+
+                if ip_limit > 0 and len(active_pids) > ip_limit:
+                    subprocess.call(["passwd", "-l", uname], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for pid in active_pids:
+                        subprocess.call(["kill", "-9", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    except Exception:
+        pass
+
+    time.sleep(3)
+"""
+
+AUTOKILL_SERVICE = """[Unit]
+Description=RareTriccks Auto-Kill & Bandwidth Tracking Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/autokill.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+DEFAULT_BANNER = (
+    '<font color="green">==========================================</font><br>\n'
+    '<font color="yellow"><b>WELCOME TO RARETRICCKS VIP VPN</b></font><br>\n'
+    '<font color="red"><b>- NO TORRENT / NO MULTILOGIN</b></font><br>\n'
+    '<font color="green">==========================================</font><br>\n'
+)
+
+def install_components_sync():
+    sh(["apt-get", "update", "-y"])
+    sh([
+        "apt-get", "install", "-y", "curl", "wget", "unzip", "tar", "net-tools",
+        "socat", "jq", "openssl", "nginx", "openssh-server", "certbot", "python3",
+        "python3-pip", "lsof", "iptables",
+    ])
+
+    if not os.path.exists(BANNER_FILE) or os.path.getsize(BANNER_FILE) == 0:
+        with open(BANNER_FILE, "w") as f:
+            f.write(DEFAULT_BANNER)
+
+    run("bash -c '$(declare -f fix_openssh_core); fix_openssh_core'")
+
+    with open("/usr/local/bin/ws-proxy.py", "w") as f:
+        f.write(WS_PROXY_SRC)
+    sh(["chmod", "+x", "/usr/local/bin/ws-proxy.py"])
+    with open("/etc/systemd/system/ws-proxy.service", "w") as f:
+        f.write(WS_PROXY_SERVICE)
+
+    with open("/usr/local/bin/autokill.py", "w") as f:
+        f.write(AUTOKILL_SRC)
+    sh(["chmod", "+x", "/usr/local/bin/autokill.py"])
+    with open("/etc/systemd/system/autokill.service", "w") as f:
+        f.write(AUTOKILL_SERVICE)
+
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "enable", "ws-proxy"])
+    sh(["systemctl", "restart", "ws-proxy"])
+    sh(["systemctl", "enable", "autokill"])
+    sh(["systemctl", "restart", "autokill"])
+
+    apply_nginx_config()
+
+def uninstall_all():
+    sh(["systemctl", "stop", "ws-proxy"])
+    sh(["systemctl", "stop", "autokill"])
+    sh(["systemctl", "disable", "ws-proxy"])
+    sh(["systemctl", "disable", "autokill"])
+    for f in [
+        "/etc/systemd/system/ws-proxy.service",
+        "/etc/systemd/system/autokill.service",
+        "/usr/local/bin/ws-proxy.py",
+        "/usr/local/bin/autokill.py",
+        "/etc/nginx/conf.d/vpn.conf",
+    ]:
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "restart", "nginx"])
+    if os.path.isdir(USERS_DIR):
+        for fname in os.listdir(USERS_DIR):
+            if fname.endswith(".conf"):
+                sh(["userdel", "-f", fname[:-5]])
+    sh(["rm", "-rf", "/etc/raretriccks"])
+    sh(["rm", "-rf", "/opt/rr-tgbot-venv"])
+    for f in ["/usr/local/bin/menu", "/usr/bin/menu"]:
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+
+def schedule_self_removal():
+    subprocess.Popen([
+        "bash", "-c",
+        "sleep 3 && systemctl disable tgbot 2>/dev/null; "
+        "systemctl stop tgbot 2>/dev/null; "
+        "rm -f /etc/systemd/system/tgbot.service /usr/local/bin/tgbot.py; "
+        "systemctl daemon-reload",
+    ])
+
+def back_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("\u2B05\uFE0F Back to Menu", callback_data="back_main")]])
+
+def main_menu_keyboard(uid):
+    rows = [
+        [InlineKeyboardButton("\u2795 Add User", callback_data="add_user"),
+         InlineKeyboardButton("\U0001F5D1 Delete User", callback_data="del_user")],
+        [InlineKeyboardButton("\U0001F4CB User List", callback_data="list_users"),
+         InlineKeyboardButton("\u23F3 Renew User", callback_data="renew_user")],
+        [InlineKeyboardButton("\U0001F310 IP Limit", callback_data="ip_limit"),
+         InlineKeyboardButton("\U0001F4BE GB Limit", callback_data="gb_limit")],
+        [InlineKeyboardButton("\U0001F50C Connected IPs", callback_data="conn_ips"),
+         InlineKeyboardButton("\u2699\uFE0F Status", callback_data="sys_status")],
+        [InlineKeyboardButton("\U0001F30D Domain", callback_data="domain"),
+         InlineKeyboardButton("\U0001F512 SSL", callback_data="ssl")],
+        [InlineKeyboardButton("\U0001F4E2 Banner", callback_data="banner"),
+         InlineKeyboardButton("\U0001F6E0 Fix WebSocket", callback_data="fix_ws")],
+        [InlineKeyboardButton("\U0001F4E6 Install Components", callback_data="install"),
+         InlineKeyboardButton("\U0001F9E8 Uninstall Panel", callback_data="uninstall")],
+    ]
+    if is_super(uid):
+        rows.append([InlineKeyboardButton("\U0001F451 Admin Management", callback_data="admin_mgmt")])
+    return InlineKeyboardMarkup(rows)
+
+def admins_text():
+    cfg = load_config()
+    admins = load_admins()
+    lines = ["\U0001F451 *Admin Management*\n"]
+    for a in admins:
+        tag = " (Super Admin)" if a == cfg.get("super_admin") else ""
+        lines.append(f"\u2022 `{a}`{tag}")
+    return "\n".join(lines)
+
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("\u2795 Add Admin", callback_data="add_admin"),
+         InlineKeyboardButton("\u2796 Remove Admin", callback_data="remove_admin")],
+        [InlineKeyboardButton("\u2B05\uFE0F Back", callback_data="back_main")],
+    ])
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("\u26D4 Access Denied. Aap authorized admin nahi hain.")
+        return
+    context.user_data['flow'] = None
+    await update.message.reply_text(
+        f"\U0001F44B Welcome to {PANEL_NAME}\n\nApna option chunein:",
+        reply_markup=main_menu_keyboard(uid),
+    )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['flow'] = None
+    await update.message.reply_text("Cancelled.")
+
+async def execute_flow(flow, data, update: Update):
+    if flow == "add_user":
+        ok, info = add_user(data["username"], data["password"], data["days"], data["ip_limit"], data["gb_limit"])
+        if ok:
+            dom = get_domain()
+            payload = f"GET /raretriccks HTTP/1.1[crlf]Host: {dom}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+            msg = (
+                f"\u2705 *Account Created*\n\n"
+                f"Domain: `{dom}`\n"
+                f"Username: `{data['username']}`\n"
+                f"Password: `{data['password']}`\n"
+                f"Expiry: `{info}`\n"
+                f"IP Limit: `{data['ip_limit']}`\n"
+                f"GB Limit: `{data['gb_limit']}`\n\n"
+                f"SSH Direct: 22, 109, 447\nSSH WS (HTTP): 80\nSSH WS (SSL): 443\n\n"
+                f"Payload:\n`{payload}`"
+            )
+        else:
+            msg = f"\u274C User create fail: {info}"
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=back_keyboard())
+    elif flow == "renew_user":
+        ok = renew_user(data["username"], data["days"])
+        await update.message.reply_text(
+            "\u2705 Renewed." if ok else "\u274C User not found.", reply_markup=back_keyboard()
+        )
+    elif flow == "ip_limit":
+        ok = update_conf_field(data["username"], "IP_LIMIT", data["value"])
+        await update.message.reply_text(
+            "\u2705 IP limit updated." if ok else "\u274C User config not found.",
+            reply_markup=back_keyboard(),
+        )
+    elif flow == "gb_limit":
+        ok = update_conf_field(data["username"], "GB_LIMIT", data["value"])
+        await update.message.reply_text(
+            "\u2705 GB limit updated." if ok else "\u274C User config not found.",
+            reply_markup=back_keyboard(),
+        )
+    elif flow == "domain":
+        set_domain(data["value"])
+        await update.message.reply_text(f"\u2705 Domain set to {data['value']}", reply_markup=back_keyboard())
+    elif flow == "banner":
+        with open(BANNER_FILE, "w") as f:
+            f.write(data["value"])
+        sh(["systemctl", "restart", "ssh"])
+        await update.message.reply_text("\u2705 Banner updated.", reply_markup=back_keyboard())
+    elif flow == "add_admin":
+        try:
+            new_id = int(data["value"])
+        except ValueError:
+            await update.message.reply_text("\u274C Invalid ID.")
+            return
+        admins = load_admins()
+        if new_id in admins:
+            await update.message.reply_text("\u26A0\uFE0F Already an admin.")
+        else:
+            admins.append(new_id)
+            save_admins(admins)
+            await update.message.reply_text(f"\u2705 Admin {new_id} added.", reply_markup=admin_menu_keyboard())
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+    flow = context.user_data.get('flow')
+    if not flow:
+        return
+    step = context.user_data.get('step', 0)
+    field, _ = FLOWS[flow][step]
+    context.user_data.setdefault('data', {})[field] = update.message.text.strip()
+    step += 1
+    if step < len(FLOWS[flow]):
+        context.user_data['step'] = step
+        await update.message.reply_text(FLOWS[flow][step][1])
+        return
+
+    data = context.user_data['data']
+    context.user_data['flow'] = None
+
+    if flow == "del_user":
+        username = data["username"]
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("\u2705 Confirm Delete", callback_data=f"do_del:{username}"),
+            InlineKeyboardButton("\u274C Cancel", callback_data="back_main"),
+        ]])
+        await update.message.reply_text(f"\u26A0\uFE0F '{username}' delete karna confirm karein:", reply_markup=kb)
+        return
+
+    if flow == "remove_admin":
+        try:
+            target = int(data["value"])
+        except ValueError:
+            await update.message.reply_text("\u274C Invalid ID.")
+            return
+        cfg = load_config()
+        if target == cfg.get("super_admin"):
+            await update.message.reply_text("\u274C Super admin remove nahi ho sakta.")
+            return
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("\u2705 Confirm Remove", callback_data=f"rm_admin:{target}"),
+            InlineKeyboardButton("\u274C Cancel", callback_data="back_main"),
+        ]])
+        await update.message.reply_text(f"\u26A0\uFE0F Admin {target} remove karna confirm karein:", reply_markup=kb)
+        return
+
+    await execute_flow(flow, data, update)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = q.from_user.id
+    if not is_admin(uid):
+        await q.answer("Access denied.", show_alert=True)
+        return
+    data = q.data
+    await q.answer()
+
+    if data == "back_main":
+        context.user_data['flow'] = None
+        await q.edit_message_text("\U0001F4CB Main Menu", reply_markup=main_menu_keyboard(uid))
+    elif data in FLOWS:
+        context.user_data['flow'] = data
+        context.user_data['step'] = 0
+        context.user_data['data'] = {}
+        field, prompt = FLOWS[data][0]
+        await q.edit_message_text(prompt)
+    elif data == "list_users":
+        await q.edit_message_text(list_users_text(), reply_markup=back_keyboard())
+    elif data == "conn_ips":
+        await q.edit_message_text(connected_ips_text(), reply_markup=back_keyboard())
+    elif data == "sys_status":
+        await q.edit_message_text(status_text(), reply_markup=back_keyboard())
+    elif data == "ssl":
+        await q.edit_message_text("\U0001F512 SSL issue ho raha hai, wait karein...")
+        ok, msg = await asyncio.to_thread(setup_ssl)
+        await q.message.reply_text(("\u2705 " if ok else "\u274C ") + msg, reply_markup=back_keyboard())
+    elif data == "fix_ws":
+        msg = fix_websocket()
+        await q.edit_message_text(f"\u2705 {msg}", reply_markup=back_keyboard())
+    elif data == "install":
+        await q.edit_message_text("\U0001F4E6 Poora system install ho raha hai (packages + OpenSSH + WebSocket + Auto-Kill), 2-5 min lagega...")
+        await asyncio.to_thread(install_components_sync)
+        await q.message.reply_text(
+            "\u2705 Installation complete! Packages, OpenSSH, Banner, WebSocket Proxy aur "
+            "Auto-Kill/Bandwidth service sab deploy ho gaye hain.\n"
+            "\u2139\uFE0F Agar aapne pehle domain set nahi kiya to Nginx SSL block abhi apply nahi hoga "
+            "\u2014 pehle Domain option se domain set karein, phir SSL issue karein.",
+            reply_markup=back_keyboard(),
+        )
+    elif data == "uninstall":
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("\u2705 Haan, Uninstall karein", callback_data="do_uninstall"),
+            InlineKeyboardButton("\u274C Cancel", callback_data="back_main"),
+        ]])
+        await q.edit_message_text(
+            "\u26A0\uFE0F Yeh sab kuch permanently remove kar dega (users, services, config, is bot samet). "
+            "Confirm karein:",
+            reply_markup=kb,
+        )
+    elif data == "do_uninstall":
+        await q.edit_message_text("\U0001F9E8 Uninstalling...")
+        await asyncio.to_thread(uninstall_all)
+        await q.message.reply_text("\u2705 Uninstall complete. Bot khud bhi band ho raha hai.")
+        schedule_self_removal()
+    elif data == "admin_mgmt":
+        if not is_super(uid):
+            await q.answer("Sirf Super Admin ke liye.", show_alert=True)
+            return
+        await q.edit_message_text(admins_text(), parse_mode="Markdown", reply_markup=admin_menu_keyboard())
+    elif data.startswith("do_del:"):
+        username = data.split(":", 1)[1]
+        delete_user(username)
+        await q.edit_message_text(f"\u2705 User {username} deleted.", reply_markup=back_keyboard())
+    elif data.startswith("rm_admin:"):
+        target = int(data.split(":", 1)[1])
+        cfg = load_config()
+        if target == cfg.get("super_admin"):
+            await q.answer("Super admin remove nahi ho sakta.", show_alert=True)
+            return
+        admins = load_admins()
+        if target in admins:
+            admins.remove(target)
+            save_admins(admins)
+        await q.edit_message_text(admins_text(), parse_mode="Markdown", reply_markup=admin_menu_keyboard())
+
+def main():
+    cfg = load_config()
+    app = Application.builder().token(cfg["token"]).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
+PY_EOF
+    chmod +x /usr/local/bin/tgbot.py
+
+    cat << 'SVC_EOF' > /etc/systemd/system/tgbot.service
+[Unit]
+Description=RareTriccks Telegram Bot
+After=network.target
+
+[Service]
+ExecStart=/opt/rr-tgbot-venv/bin/python3 /usr/local/bin/tgbot.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+}
+
+apply_nginx_config() {
+    local MY_DOMAIN=$(get_domain)
+
+    if [[ "$MY_DOMAIN" == "No Domain Set" || -z "$MY_DOMAIN" ]]; then
+        return
+    fi
+
+    cat << NGX_EOF > /etc/nginx/conf.d/vpn.conf
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name ${MY_DOMAIN} _;
 
     location / {
-        proxy_pass http://127.0.0.1:${WS_SSH_PORT};
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location ${CUSTOM_PATH} {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 }
-NGINX_EOF
-    fi
 
-    nginx -t &>/tmp/nginx_check.log
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}[ERROR] Nginx config invalid!${NC}"
-        cat /tmp/nginx_check.log
-        return 1
-    fi
+server {
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    server_name ${MY_DOMAIN} _;
 
-    systemctl enable nginx &>/dev/null
-    systemctl restart nginx
-    wait_for_port 127.0.0.1 80 "Nginx (80)" 10
-    if [[ "$HAVE_SSL" -eq 1 ]]; then
-        wait_for_port 127.0.0.1 443 "Nginx (443, TLS)" 10
-    fi
+    ssl_certificate /etc/letsencrypt/live/${MY_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${MY_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location ${CUSTOM_PATH} {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:2082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+NGX_EOF
+    rm -f /etc/nginx/sites-enabled/default
+    systemctl restart nginx 2>/dev/null
 }
 
 add_domain_option() {
@@ -814,7 +1150,7 @@ add_domain_option() {
     echo -e "${CYAN}====================================================${NC}"
     echo -e "${YELLOW}        ADD / CHANGE DOMAIN NAME                    ${NC}"
     echo -e "${CYAN}====================================================${NC}"
-    read -rp " Apna Domain Enter Karein (e.g. freebasics676.raretriccks.store): " new_dom
+    read -rp " Apna Domain Enter Karein (e.g. sub.yourdomain.com): " new_dom
 
     if [[ -z "$new_dom" ]]; then
         echo -e "${RED}[ERROR] Domain khaali nahi chhod sakte!${NC}"
@@ -822,7 +1158,7 @@ add_domain_option() {
         mkdir -p /etc/raretriccks
         echo "$new_dom" > "$DOMAIN_FILE"
         echo -e "\n${GREEN}[SUCCESS] Domain successfully set to: ${CYAN}${new_dom}${NC}"
-        configure_nginx_proxy
+        apply_nginx_config
     fi
     press_any_key
 }
@@ -833,29 +1169,25 @@ install_all_components() {
     echo -e "${YELLOW}   ${PANEL_NAME} - SYSTEM INSTALLATION           ${NC}"
     echo -e "${CYAN}====================================================${NC}"
 
-    echo -e "${BLUE}[1/8] Updating Packages...${NC}"
+    echo -e "${BLUE}[1/6] Updating Packages...${NC}"
     apt update -y && apt upgrade -y
 
-    echo -e "${BLUE}[2/8] Installing Required Tools...${NC}"
-    apt install -y curl wget unzip tar net-tools socat jq openssl nginx dropbear certbot python3 python3-pip lsof iptables golang-go
+    echo -e "${BLUE}[2/6] Installing Required Tools...${NC}"
+    apt install -y curl wget unzip tar net-tools socat jq openssl nginx openssh-server certbot python3 python3-pip lsof iptables
 
-    echo -e "${BLUE}[3/8] Configuring Dropbear SSH & Banner...${NC}"
-cat << 'EOF' > $BANNER_FILE
+    echo -e "${BLUE}[3/6] Configuring OpenSSH & Banner...${NC}"
+
+    cat << 'BANNER_EOF' > $BANNER_FILE
 <font color="green">==========================================</font><br>
 <font color="yellow"><b>WELCOME TO RARETRICCKS VIP VPN</b></font><br>
 <font color="red"><b>- NO TORRENT / NO MULTILOGIN</b></font><br>
 <font color="green">==========================================</font><br>
-EOF
+BANNER_EOF
 
-    fix_dropbear_core
-    sed -i 's/#Banner none/Banner \/etc\/issue.net/g' /etc/ssh/sshd_config
-    systemctl restart ssh
+    fix_openssh_core
 
-    echo -e "${BLUE}[4/8] Installing BadVPN UDP Gateway (Gaming/Calls)...${NC}"
-    install_badvpn_udpgw
-
-    echo -e "${BLUE}[5/8] Creating Python WebSocket Service...${NC}"
-cat << 'EOF' > /usr/local/bin/ws-proxy.py
+    echo -e "${BLUE}[4/6] Creating Multi-Payload Python WebSocket Service...${NC}"
+    cat << 'WS_EOF' > /usr/local/bin/ws-proxy.py
 import socket, threading, select, time
 
 PORT = 2082
@@ -874,12 +1206,10 @@ def handle_client(client_socket, client_addr):
     real_ip = client_addr[0]
     try:
         client_socket.settimeout(10)
-        request_raw = client_socket.recv(4096)
-        if not request_raw:
+        request = client_socket.recv(4096).decode('utf-8', errors='ignore')
+        if not request:
             client_socket.close()
             return
-
-        request = request_raw.decode('utf-8', errors='ignore')
 
         for line in request.split('\r\n'):
             if line.lower().startswith('x-forwarded-for:') or line.lower().startswith('x-real-ip:'):
@@ -918,9 +1248,9 @@ server.listen(200)
 while True:
     client, addr = server.accept()
     threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
-EOF
+WS_EOF
 
-cat << 'EOF' > /etc/systemd/system/ws-proxy.service
+    cat << SVC_EOF > /etc/systemd/system/ws-proxy.service
 [Unit]
 Description=RareTriccks WebSocket Proxy Service
 After=network.target
@@ -931,496 +1261,18 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVC_EOF
 
     systemctl daemon-reload
     systemctl enable ws-proxy
     systemctl restart ws-proxy
-    wait_for_port 127.0.0.1 2082 "WS-Proxy (2082)" 10
+    apply_nginx_config
 
-    echo -e "${BLUE}[6/8] Installing Xray-core & Nginx Reverse Proxy...${NC}"
-    install_xray_core
-    if command -v xray &>/dev/null; then
-        configure_xray
-        configure_nginx_proxy
-    else
-        echo -e "${RED}[ERROR] Xray-core install fail ho gaya, Nginx proxy skip kiya ja raha hai.${NC}"
-    fi
-
-    echo -e "${BLUE}[7/8] Installing Bandwidth Tracking Engine...${NC}"
+    echo -e "${BLUE}[5/6] Installing Bandwidth & IPTables Tracking Engine...${NC}"
     install_python_tracker
 
-    echo -e "${BLUE}[8/8] SlowDNS (SSH over DNS)...${NC}"
-    if [[ -n "$(get_ns_domain)" ]]; then
-        install_slowdns_binary && slowdns_generate_keys && configure_slowdns_service
-    else
-        echo -e "${YELLOW}[SKIP] NS Domain abhi set nahi hai. Install ke baad 'SlowDNS Management' menu se NS Domain set karke install karein.${NC}"
-    fi
-
-    echo -e "\n${GREEN}[SUCCESS] Base components, BadVPN, Xray, Nginx & SlowDNS setup complete!${NC}"
-    status_check_inline
+    echo -e "\n${GREEN}[SUCCESS] Base components & Protection Engine Installed!${NC}"
     press_any_key
-}
-
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
-XRAY_SVC_USER="xray-svc"
-
-install_xray_core() {
-    if ! command -v xray &>/dev/null; then
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    fi
-    mkdir -p /usr/local/etc/xray
-    fix_xray_service_user
-    systemctl enable xray &>/dev/null
-    if ! command -v xray &>/dev/null; then
-        echo -e "${RED}[ERROR] Xray binary /usr/local/bin/xray nahi mila. Install script fail ho gaya.${NC}"
-        return 1
-    fi
-    return 0
-}
-
-fix_xray_service_user() {
-    if ! id "$XRAY_SVC_USER" &>/dev/null; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin "$XRAY_SVC_USER" 2>/dev/null
-    fi
-
-    local unit="/etc/systemd/system/xray.service"
-    if [[ -f "$unit" ]]; then
-        if grep -q '^User=' "$unit"; then
-            sed -i "s/^User=.*/User=${XRAY_SVC_USER}/" "$unit"
-        else
-            sed -i "/\[Service\]/a User=${XRAY_SVC_USER}" "$unit"
-        fi
-        if grep -q '^Group=' "$unit"; then
-            sed -i "s/^Group=.*/Group=${XRAY_SVC_USER}/" "$unit"
-        else
-            sed -i "/\[Service\]/a Group=${XRAY_SVC_USER}" "$unit"
-        fi
-        systemctl daemon-reload
-    fi
-}
-
-configure_xray() {
-    mkdir -p /usr/local/etc/xray
-    fix_xray_service_user
-    local MY_DOMAIN=$(get_domain)
-    local HAVE_CERT=0
-    if copy_xray_certs; then HAVE_CERT=1; fi
-    local CERT_FILE="$XRAY_CERT_FILE"
-    local KEY_FILE="$XRAY_KEY_FILE"
-
-    mkdir -p /var/log/xray
-    chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || chown -R nobody:nogroup /var/log/xray
-
-    # IMPORTANT: back up the live config BEFORE overwriting it - this is what already-added
-    # V2Ray clients live in. Without this, re-running SSL setup (or install) wipes every
-    # user's UUID out of Xray, which looks exactly like "V2Ray TLS won't connect" afterwards.
-    local OLD_XRAY_BACKUP=""
-    if [[ -s "$XRAY_CONFIG" ]]; then
-        OLD_XRAY_BACKUP=$(mktemp)
-        cp "$XRAY_CONFIG" "$OLD_XRAY_BACKUP"
-    fi
-
-cat << XR_EOF > "$XRAY_CONFIG"
-{
-  "log": { "loglevel": "warning", "access": "${XRAY_ACCESS_LOG}" },
-  "api": { "tag": "api", "services": ["HandlerService", "StatsService", "LoggerService"] },
-  "stats": {},
-  "policy": {
-    "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true } },
-    "system": { "statsInboundUplink": true, "statsInboundDownlink": true }
-  },
-  "inbounds": [
-    {
-      "tag": "api-in",
-      "listen": "127.0.0.1",
-      "port": 10085,
-      "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1" }
-    },
-    {
-      "tag": "ws-tls-in",
-      "listen": "127.0.0.1",
-      "port": ${XRAY_WS_TLS_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" } }
-    },
-    {
-      "tag": "ws-plain-in",
-      "listen": "127.0.0.1",
-      "port": ${XRAY_WS_PLAIN_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" } }
-    },
-    {
-      "tag": "xhttp-in",
-      "listen": "0.0.0.0",
-      "port": ${XRAY_XHTTP_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "xhttp", "security": "none", "xhttpSettings": { "path": "${V2RAY_XHTTP_PATH}", "mode": "auto" } }
-    },
-    {
-      "tag": "tcp-plain-in",
-      "listen": "0.0.0.0",
-      "port": ${XRAY_TCP_PLAIN_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "tcp" }
-    },
-    {
-      "tag": "tcp-tls-in",
-      "listen": "0.0.0.0",
-      "port": ${XRAY_TCP_TLS_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "tcp", "security": "none" }
-    },
-    {
-      "tag": "grpc-in",
-      "listen": "0.0.0.0",
-      "port": ${XRAY_GRPC_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "grpc", "grpcSettings": { "serviceName": "${V2RAY_GRPC_SERVICE}" } }
-    }
-  ],
-  "outbounds": [ { "protocol": "freedom", "tag": "direct" } ],
-  "routing": {
-    "rules": [
-      { "type": "field", "inboundTag": ["api-in"], "outboundTag": "api" }
-    ]
-  }
-}
-XR_EOF
-    chmod 644 "$XRAY_CONFIG"
-
-    if [[ "$HAVE_CERT" -eq 1 && -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
-        tmp=$(mktemp)
-        jq --arg cert "$CERT_FILE" --arg key "$KEY_FILE" \
-           '(.inbounds[] | select(.tag=="xhttp-in" or .tag=="tcp-tls-in") | .streamSettings) += { "security": "tls", "tlsSettings": { "certificates": [ { "certificateFile": $cert, "keyFile": $key } ] } }' \
-           "$XRAY_CONFIG" > "$tmp"
-        if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-            mv "$tmp" "$XRAY_CONFIG"
-        else
-            rm -f "$tmp"
-        fi
-        chmod 644 "$XRAY_CONFIG"
-    fi
-
-    if [[ -n "$OLD_XRAY_BACKUP" && -s "$OLD_XRAY_BACKUP" ]]; then
-        for tag in ws-tls-in ws-plain-in xhttp-in tcp-plain-in tcp-tls-in grpc-in; do
-            local old_clients
-            old_clients=$(jq -c --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag) | .settings.clients[]?]' "$OLD_XRAY_BACKUP" 2>/dev/null)
-            [[ -z "$old_clients" || "$old_clients" == "null" ]] && old_clients="[]"
-            tmp=$(mktemp)
-            jq --arg tag "$tag" --argjson oc "$old_clients" \
-               '(.inbounds[] | select(.tag==$tag) | .settings.clients) = $oc' \
-               "$XRAY_CONFIG" > "$tmp"
-            if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-                mv "$tmp" "$XRAY_CONFIG"
-            else
-                rm -f "$tmp"
-            fi
-        done
-        rm -f "$OLD_XRAY_BACKUP"
-        chmod 644 "$XRAY_CONFIG"
-    fi
-
-    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
-        echo -e "${RED}[ERROR] Xray config invalid!${NC}"
-        cat /tmp/xray_check.log
-        return 1
-    fi
-
-    systemctl restart xray
-    wait_for_port 127.0.0.1 "$XRAY_WS_TLS_PORT" "Xray ws-tls-in" 10
-    wait_for_port 127.0.0.1 "$XRAY_WS_PLAIN_PORT" "Xray ws-plain-in" 10
-}
-
-# Injects a client into every protocol inbound (used by both new-user add and unlock/re-add)
-v2ray_inject_client() {
-    local uname="$1"
-    local uuid="$2"
-    local backup
-    backup=$(mktemp)
-    cp "$XRAY_CONFIG" "$backup"
-
-    for tag in ws-tls-in ws-plain-in xhttp-in tcp-plain-in tcp-tls-in grpc-in; do
-        tmp=$(mktemp)
-        jq --arg tag "$tag" --arg id "$uuid" --arg email "$uname" \
-           '(.inbounds[] | select(.tag==$tag) | .settings.clients) += [{"id": $id, "email": $email}]' \
-           "$XRAY_CONFIG" > "$tmp"
-        if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-            mv "$tmp" "$XRAY_CONFIG"
-        else
-            rm -f "$tmp"
-            cp "$backup" "$XRAY_CONFIG"
-            rm -f "$backup"
-            return 1
-        fi
-    done
-    chmod 644 "$XRAY_CONFIG"
-
-    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
-        cp "$backup" "$XRAY_CONFIG"
-        rm -f "$backup"
-        systemctl restart xray &>/dev/null
-        return 1
-    fi
-    rm -f "$backup"
-
-    timeout 15 systemctl restart xray
-    return 0
-}
-
-# Removes a client from every protocol inbound (used by delete AND by auto-lock on breach)
-v2ray_strip_client() {
-    local uname="$1"
-    local backup
-    backup=$(mktemp)
-    cp "$XRAY_CONFIG" "$backup"
-
-    tmp=$(mktemp)
-    jq --arg email "$uname" \
-       '(.inbounds[].settings.clients) |= map(select(.email != $email))' \
-       "$XRAY_CONFIG" > "$tmp"
-    if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-        mv "$tmp" "$XRAY_CONFIG"
-    else
-        rm -f "$tmp" "$backup"
-        return 1
-    fi
-    chmod 644 "$XRAY_CONFIG"
-
-    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
-        cp "$backup" "$XRAY_CONFIG"
-        rm -f "$backup"
-        systemctl restart xray &>/dev/null
-        return 1
-    fi
-    rm -f "$backup"
-
-    timeout 15 systemctl restart xray
-}
-
-# Full add: creates the xray clients AND the limits/quota conf file (mirrors ssh_menu behaviour)
-v2ray_add_user() {
-    local uname="$1"
-    local uuid="$2"
-    local ip_limit="${3:-0}"
-    local gb_limit="${4:-Unlimited}"
-    local exp_days="${5:-0}"
-    [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
-
-    if ! v2ray_inject_client "$uname" "$uuid"; then
-        return 1
-    fi
-
-    mkdir -p "$V2USERS_DIR"
-    local expire_date="Unlimited"
-    if [[ "$exp_days" =~ ^[0-9]+$ && "$exp_days" -gt 0 ]]; then
-        expire_date=$(date -d "+${exp_days} days" +"%Y-%m-%d")
-    fi
-
-cat << V2_EOF > "${V2USERS_DIR}/${uname}.conf"
-USERNAME=$uname
-UUID=$uuid
-IP_LIMIT=$ip_limit
-GB_LIMIT=$gb_limit
-USED_MB=0.0
-EXPIRE_DATE=$expire_date
-LOCKED=0
-V2_EOF
-
-    echo "$uuid"
-}
-
-v2ray_delete_user() {
-    local uname="$1"
-    if v2ray_strip_client "$uname"; then
-        rm -f "${V2USERS_DIR}/${uname}.conf"
-        return 0
-    fi
-    return 1
-}
-
-# Re-injects a locked/expired user back into xray using the UUID stored in their conf file
-v2ray_unlock_user() {
-    local uname="$1"
-    local conf="${V2USERS_DIR}/${uname}.conf"
-    [[ -f "$conf" ]] || return 1
-    local uuid
-    uuid=$(grep '^UUID=' "$conf" | cut -d= -f2)
-    [[ -z "$uuid" ]] && return 1
-
-    # Make sure we don't double-inject if somehow still present
-    v2ray_strip_client "$uname" &>/dev/null
-    if v2ray_inject_client "$uname" "$uuid"; then
-        sed -i 's/^LOCKED=.*/LOCKED=0/' "$conf"
-        return 0
-    fi
-    return 1
-}
-
-v2ray_list_users() {
-    jq -r '.inbounds[] | select(.tag=="ws-tls-in") | .settings.clients[]? | "\(.email)  ->  \(.id)"' "$XRAY_CONFIG" 2>/dev/null
-    if [[ -d "$V2USERS_DIR" ]]; then
-        echo -e "\n${CYAN}--- Limits / Quota (from conf) ---${NC}"
-        for f in "${V2USERS_DIR}"/*.conf; do
-            [[ -e "$f" ]] || continue
-            local uname ip gb used exp locked
-            uname=$(grep '^USERNAME=' "$f" | cut -d= -f2)
-            ip=$(grep '^IP_LIMIT=' "$f" | cut -d= -f2)
-            gb=$(grep '^GB_LIMIT=' "$f" | cut -d= -f2)
-            used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
-            exp=$(grep '^EXPIRE_DATE=' "$f" | cut -d= -f2)
-            locked=$(grep '^LOCKED=' "$f" | cut -d= -f2)
-            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRE=${exp} LOCKED=${locked}"
-        done
-    fi
-}
-
-v2ray_add_user_flow() {
-    local MY_DOMAIN=$(get_domain)
-    read -rp "Username/Remarks (e.g. test): " vu
-    read -rp "Custom UUID (Leave blank for auto-generate): " custom_uuid
-    read -rp "Expired Days (0 for unlimited): " vexp
-    read -rp "IP Limit (0 for unlimited): " vip
-    read -rp "GB Limit (e.g. 10 or Unlimited): " vgb
-    [[ -z "$vu" ]] && { echo -e "${RED}Username khaali nahi ho saka${NC}"; press_any_key; return; }
-    local gen_uuid
-    gen_uuid=$(v2ray_add_user "$vu" "$custom_uuid" "$vip" "$vgb" "$vexp")
-    if [[ -z "$gen_uuid" ]]; then
-        echo -e "\n${RED}[FAILED] User add nahi ho saka.${NC}"
-        press_any_key
-        return
-    fi
-    echo -e "\n${GREEN}[SUCCESS] V2Ray User '${vu}' added successfully!${NC}"
-    echo -e "${CYAN}UUID          : ${gen_uuid}${NC}"
-    echo -e "${CYAN}IP Limit      : ${vip:-0}${NC}"
-    echo -e "${CYAN}GB Limit      : ${vgb:-Unlimited}${NC}"
-    echo -e "${CYAN}BadVPN UDPGW  : 127.0.0.1:${BADVPN_PORT} (Built-in active for Gaming & Calls)${NC}"
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-    echo -e "${GREEN}Link WS TLS       :${NC} vless://${gen_uuid}@${MY_DOMAIN}:443?type=ws&encryption=none&security=tls&host=${MY_DOMAIN}&path=${V2RAY_WS_PATH}#XRAY_VLESS_WS_${vu}"
-    echo -e "${GREEN}Link WS NoTLS     :${NC} vless://${gen_uuid}@${MY_DOMAIN}:80?type=ws&encryption=none&security=none&host=${MY_DOMAIN}&path=${V2RAY_WS_PATH}#XRAY_VLESS_WS_${vu}"
-    echo -e "${GREEN}Link XHTTP (TLS)  :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_XHTTP_PORT}?type=xhttp&encryption=none&security=tls&host=${MY_DOMAIN}&path=${V2RAY_XHTTP_PATH}&mode=auto#XRAY_VLESS_XHTTP_${vu}"
-    echo -e "${GREEN}Link TCP (Plain)  :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_TCP_PLAIN_PORT}?type=tcp&encryption=none&security=none#XRAY_VLESS_TCP_${vu}"
-    echo -e "${GREEN}Link TCP (TLS)    :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_TCP_TLS_PORT}?type=tcp&encryption=none&security=tls&host=${MY_DOMAIN}#XRAY_VLESS_TCP_TLS_${vu}"
-    echo -e "${GREEN}Link gRPC         :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_GRPC_PORT}?type=grpc&encryption=none&security=none&serviceName=${V2RAY_GRPC_SERVICE}#XRAY_VLESS_GRPC_${vu}"
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
-
-v2ray_delete_user_flow() {
-    read -rp "Username/Remarks to delete: " vu
-    if v2ray_delete_user "$vu"; then
-        echo -e "${GREEN}[SUCCESS] User removed.${NC}"
-    else
-        echo -e "${RED}[FAILED] User remove nahi ho saka.${NC}"
-    fi
-    press_any_key
-}
-
-v2ray_menu() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          V2RAY / XRAY MANAGEMENT                  ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e " 1) Add V2Ray User (Auto UUID or Custom + BadVPN)"
-    echo -e " 2) Delete V2Ray User"
-    echo -e " 3) List V2Ray Users"
-    echo -e " 4) Back"
-    echo -e "${CYAN}====================================================${NC}"
-    read -rp "Option [1-4]: " v_opt
-    case $v_opt in
-        1) v2ray_add_user_flow ;;
-        2) v2ray_delete_user_flow ;;
-        3)
-            clear
-            echo -e "${CYAN}--- Active V2Ray Users ---${NC}"
-            v2ray_list_users
-            press_any_key
-            ;;
-        4) return ;;
-    esac
-}
-
-ssh_add_user_flow() {
-    local MY_DOMAIN=$(get_domain)
-    read -rp "Username: " su
-    read -rp "Password: " sp
-    read -rp "Expired Days: " sd
-    read -rp "IP Limit (0 for unlimited): " sil
-    read -rp "GB Limit (e.g. 10 or Unlimited): " sgb
-
-    if id "$su" &>/dev/null; then
-        echo -e "${RED}User pehle se mojood hai!${NC}"
-        press_any_key
-        return
-    fi
-
-    useradd -e "$(date -d "+$sd days" +"%Y-%m-%d")" -s /bin/bash -m "$su"
-    echo -e "$sp\n$sp" | passwd "$su" &>/dev/null
-
-    mkdir -p "$USERS_DIR"
-cat << U_EOF > "${USERS_DIR}/${su}.conf"
-USERNAME=$su
-PASSWORD=$sp
-IP_LIMIT=$sil
-GB_LIMIT=$sgb
-USED_MB=0.0
-U_EOF
-
-    echo -e "\n${GREEN}[SUCCESS] SSH WS Account Created Successfully!${NC}"
-    echo -e "${CYAN}Username    : ${su}${NC}"
-    echo -e "${CYAN}Password    : ${sp}${NC}"
-    echo -e "${CYAN}Host/IP     : ${MY_DOMAIN}${NC}"
-    echo -e "${CYAN}WS Port     : 80 / 443 (via Nginx -> 2082)${NC}"
-    echo -e "${CYAN}BadVPN Port : 127.0.0.1:${BADVPN_PORT} (Active for Gaming & Calls)${NC}"
-    if systemctl is-active slowdns &>/dev/null; then
-        echo -e "${CYAN}SlowDNS     : Isi username/password se bhi login hoga (NS: $(get_ns_domain), Pubkey: SlowDNS Management > Show Info)${NC}"
-    fi
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
-
-ssh_delete_user_flow() {
-    read -rp "Username to delete: " su
-    userdel -f "$su" &>/dev/null
-    rm -f "${USERS_DIR}/${su}.conf"
-    echo -e "${GREEN}[SUCCESS] SSH User removed.${NC}"
-    press_any_key
-}
-
-ssh_list_users() {
-    ls -l "${USERS_DIR}" 2>/dev/null | awk '{print $9}' | sed 's/\.conf//g'
-}
-
-ssh_menu() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}          SSH / DROPBEAR / WS MANAGEMENT           ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e " 1) Add SSH / WS Account (Auth Fixed / Safe Shell)"
-    echo -e " 2) Delete SSH Account"
-    echo -e " 3) List SSH Accounts"
-    echo -e " 4) Back"
-    echo -e "${CYAN}====================================================${NC}"
-    read -rp "Option [1-4]: " s_opt
-    case $s_opt in
-        1) ssh_add_user_flow ;;
-        2) ssh_delete_user_flow ;;
-        3)
-            clear
-            echo -e "${CYAN}--- Active SSH Users ---${NC}"
-            ssh_list_users
-            press_any_key
-            ;;
-        4) return ;;
-    esac
 }
 
 setup_ssl() {
@@ -1437,232 +1289,129 @@ setup_ssl() {
     echo -e "${YELLOW}  ${PANEL_NAME} - ISSUING SSL (${current_dom}) ${NC}"
     echo -e "${CYAN}====================================================${NC}"
 
-    rm -f "$WILDCARD_FILE"
+    systemctl stop nginx
 
-    systemctl stop nginx 2>/dev/null
     certbot certonly --standalone --preferred-challenges http --agree-tos --register-unsafely-without-email -d "$current_dom"
 
     if [[ -f "/etc/letsencrypt/live/$current_dom/fullchain.pem" ]]; then
         echo -e "\n${GREEN}[SUCCESS] SSL Active for ${current_dom}!${NC}"
-        install_renewal_hook
-        configure_xray
-        configure_nginx_proxy
-        echo -e "${CYAN}----------------------------------------------------${NC}"
-        if systemctl is-active nginx &>/dev/null; then
-            echo -e "${GREEN}[SUCCESS] Nginx reloaded with SSL cert & is running fine.${NC}"
-        else
-            echo -e "${RED}[ERROR] Nginx SSL cert ke saath reload nahi ho saka! 'journalctl -xeu nginx' check karein.${NC}"
-        fi
+        apply_nginx_config
+        echo -e "${GREEN}[SUCCESS] Nginx SSL & WebSocket Proxy Configured!${NC}"
     else
-        echo -e "${RED}[ERROR] SSL Fail ho gaya!${NC}"
+        echo -e "${RED}[ERROR] SSL Fail ho gaya! Domain A Record IP par pointed hai ya nahi check karein.${NC}"
     fi
+
     press_any_key
 }
 
-install_renewal_hook() {
-    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat << 'HOOK_EOF' > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
-#!/bin/bash
-# Only restart nginx if its config is actually valid right now.
-# During a fresh 'Issue SSL Certificate' run, this hook fires WHILE nginx is
-# deliberately stopped (standalone challenge) and BEFORE the panel has written
-# the new TLS server block - restarting here would fail and print a scary
-# (but harmless) error. The panel reconfigures + restarts nginx itself right
-# after certbot returns, so this hook only needs to matter on real renewals,
-# when nginx is already running with a valid config.
-if nginx -t &>/dev/null; then
-    systemctl restart nginx
-fi
-systemctl restart xray 2>/dev/null
-systemctl restart slowdns 2>/dev/null
-HOOK_EOF
-    chmod +x /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
-}
-
-status_check_inline() {
-    local current_dom=$(get_domain)
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-    echo -e " Domain        : ${current_dom}"
-    echo -e " Nginx         : $(systemctl is-active nginx)"
-    echo -e " Dropbear SSH  : $(systemctl is-active dropbear)"
-    echo -e " WS Proxy      : $(systemctl is-active ws-proxy)"
-    echo -e " BadVPN UDPGW  : $(systemctl is-active badvpn)"
-    echo -e " Xray-core     : $(systemctl is-active xray)"
-    echo -e " SlowDNS       : $(systemctl is-active slowdns)"
-    echo -e " Auto-Kill     : $(systemctl is-active autokill)"
-    echo -e " Port 80       : $(ss -tln 2>/dev/null | grep -q ':80 ' && echo LISTENING || echo DOWN)"
-    echo -e " Port 443      : $(ss -tln 2>/dev/null | grep -q ':443 ' && echo LISTENING || echo DOWN)"
-    echo -e " UDPGW Port    : $(ss -tln 2>/dev/null | grep -q ':7300 ' && echo LISTENING || echo DOWN)"
-    echo -e " SlowDNS Port  : $(ss -uln 2>/dev/null | grep -q ':53 ' && echo LISTENING || echo DOWN)"
-    echo -e "${CYAN}----------------------------------------------------${NC}"
-}
-
-status_check() {
+check_connected_ips() {
     clear
     echo -e "${CYAN}====================================================================${NC}"
-    echo -e "${YELLOW}${BOLD}                     SYSTEM & PROTOCOL STATUS                       ${NC}"
+    echo -e "${YELLOW}${BOLD}                     CONNECTED IPS & ACTIVE USERS                   ${NC}"
     echo -e "${CYAN}====================================================================${NC}"
-    status_check_inline
-    press_any_key
-}
 
-check_connected_ips_option() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}     CONNECTED IPs & ACTIVE ONLINE USERS           ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${BLUE}--- SSH / Dropbear Active Sessions (includes WS & SlowDNS tunnels) ---${NC}"
-    ps aux 2>/dev/null | grep '[d]ropbear'
-    echo ""
-    echo -e "${BLUE}Recent successful SSH logins (last 50 log lines):${NC}"
-    journalctl -u dropbear --no-pager -n 50 2>/dev/null | grep "Password auth succeeded"
-    echo ""
-    echo -e "${BLUE}--- V2Ray / Xray Recent Connections (last 200 access-log lines) ---${NC}"
-    if [[ -f "$XRAY_ACCESS_LOG" ]]; then
-        tail -n 200 "$XRAY_ACCESS_LOG" | grep -oE "from [0-9.]+:[0-9]+ .*email: [A-Za-z0-9_.-]+"
-    else
-        echo -e "${YELLOW}Xray access log abhi maujood nahi. Naya config apply karne ke liye V2Ray/Xray Management se Xray dobara configure/restart karein.${NC}"
+    echo -e "${GREEN}Active Online SSH / WebSocket Sessions:${NC}"
+    echo -e "${CYAN}--------------------------------------------------------------------${NC}"
+
+    local total_count=0
+    local raw_logs=""
+    if command -v journalctl &>/dev/null; then
+        raw_logs=$(journalctl -u ssh --no-pager -n 400 2>/dev/null)
     fi
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
+    [[ -f "/var/log/auth.log" ]] && raw_logs+=$'\n'$(cat /var/log/auth.log 2>/dev/null)
 
-check_status_quota_option() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}     USER STATUS, QUOTA & LIMITS                   ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${BLUE}--- SSH Users ---${NC}"
-    if [[ -d "$USERS_DIR" ]]; then
-        for f in "${USERS_DIR}"/*.conf; do
-            [[ -e "$f" ]] || continue
-            local uname ip gb used exp lockstat
-            uname=$(grep '^USERNAME=' "$f" | cut -d= -f2)
-            ip=$(grep '^IP_LIMIT=' "$f" | cut -d= -f2)
-            gb=$(grep '^GB_LIMIT=' "$f" | cut -d= -f2)
-            used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
-            exp=$(chage -l "$uname" 2>/dev/null | grep "Account expires" | awk -F': ' '{print $2}')
-            lockstat=$(passwd -S "$uname" 2>/dev/null | awk '{print $2}')
-            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRES=${exp:-N/A} STATUS=${lockstat:-N/A}"
-        done
-    else
-        echo " (koi SSH user nahi mila)"
-    fi
-    echo ""
-    echo -e "${BLUE}--- V2Ray Users ---${NC}"
-    v2ray_list_users
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
+    mapfile -t external_ips < <(ss -tnp 2>/dev/null | grep -E ":(80|443|2082)" | grep "ESTAB" | awk '{print $5}' | cut -d: -f1 | grep -vE "^127\.|^::1" | sort -u)
+    mapfile -t ws_logged_ips < <(grep -oP "(?<=REAL_IP:)\S+" /var/log/ws-proxy.log 2>/dev/null | tail -n 20 | sort -u)
 
-renew_expiry_option() {
-    clear
-    echo -e "${CYAN}--- Renew Account Expiry ---${NC}"
-    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
-    read -rp "Username: " uname
-    read -rp "New Expiry (Days from today, 0 = unlimited): " days
+    local real_ip_pool=($(echo "${external_ips[@]} ${ws_logged_ips[@]}" | tr ' ' '\n' | sort -u))
+    local ip_index=0
 
-    if [[ "$at" == "1" ]]; then
-        if ! id "$uname" &>/dev/null; then
-            echo -e "${RED}[ERROR] SSH user nahi mila.${NC}"
-        else
-            if [[ "$days" == "0" ]]; then
-                usermod -e "" "$uname"
-            else
-                usermod -e "$(date -d "+$days days" +"%Y-%m-%d")" "$uname"
+    for pid in $(ps aux | grep sshd | grep -v grep | awk '{print $2}'); do
+        local user_match=$(echo "$raw_logs" | grep "sshd\[$pid\]" | grep -i "Accepted" | tail -n 1)
+
+        if [[ -n "$user_match" ]]; then
+            local username=$(echo "$user_match" | grep -oP "(?<=Accepted \w+ for )\w+")
+            local logged_ip=$(echo "$user_match" | grep -oP "(?<=from )\S+")
+            local final_ip="$logged_ip"
+
+            if [[ "$logged_ip" == "127.0.0.1" || -z "$logged_ip" ]]; then
+                if [[ ${#real_ip_pool[@]} -gt 0 && $ip_index -lt ${#real_ip_pool[@]} ]]; then
+                    final_ip="${real_ip_pool[$ip_index]} (WS Tunnel)"
+                    ip_index=$((ip_index + 1))
+                else
+                    final_ip="WS-Proxy Client"
+                fi
             fi
-            passwd -u "$uname" &>/dev/null
-            echo -e "${GREEN}[SUCCESS] SSH user '${uname}' expiry updated & account unlocked.${NC}"
-        fi
-    elif [[ "$at" == "2" ]]; then
-        local conf="${V2USERS_DIR}/${uname}.conf"
-        if [[ ! -f "$conf" ]]; then
-            echo -e "${RED}[ERROR] V2Ray user nahi mila.${NC}"
-        else
-            if [[ "$days" == "0" ]]; then
-                sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=Unlimited/" "$conf"
-            else
-                sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=$(date -d "+$days days" +"%Y-%m-%d")/" "$conf"
+
+            if [[ -n "$username" ]]; then
+                printf " User: %-18s | IP/Source: %-25s [ONLINE]\n" "$username" "$final_ip"
+                total_count=$((total_count + 1))
             fi
-            v2ray_unlock_user "$uname"
-            echo -e "${GREEN}[SUCCESS] V2Ray user '${uname}' expiry updated & auto-unlocked.${NC}"
         fi
-    else
-        echo -e "${RED}[ERROR] Invalid account type.${NC}"
+    done
+
+    local active_sockets=$(ss -tnp 2>/dev/null | grep -E ":(109|447|22)" | grep -i "ESTAB" | wc -l)
+    if [[ $total_count -lt $active_sockets ]]; then
+        echo -e "${YELLOW} Detected ${active_sockets} Active Tunnel Socket(s) connected to OpenSSH Core.${NC}"
+        [[ $total_count -eq 0 ]] && total_count=$active_sockets
     fi
+
+    if [[ $total_count -eq 0 ]]; then
+        echo -e "${YELLOW} Filhal koi active user connected nahi hai.${NC}"
+    fi
+
+    echo -e "${CYAN}====================================================================${NC}"
+    echo -e " Total Active Sessions: ${BOLD}${total_count}${NC}"
+    echo -e "${CYAN}====================================================================${NC}"
     press_any_key
 }
 
-modify_ip_limit_option() {
+check_gb_usage() {
     clear
-    echo -e "${CYAN}--- Extend / Modify IP Limit (Auto Unlock) ---${NC}"
-    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
-    read -rp "Username: " uname
-    read -rp "New IP Limit (0 = unlimited): " newip
+    echo -e "${CYAN}====================================================================${NC}"
+    echo -e "${YELLOW}${BOLD}                USER BANDWIDTH / EXPIRY & LOCK STATUS               ${NC}"
+    echo -e "${CYAN}====================================================================${NC}"
 
-    if [[ "$at" == "1" ]]; then
-        local conf="${USERS_DIR}/${uname}.conf"
-        if [[ ! -f "$conf" ]]; then
-            echo -e "${RED}[ERROR] SSH user conf nahi mila.${NC}"
+    printf " %-14s | %-7s | %-10s | %-12s | %-10s\n" "USERNAME" "IP LIMIT" "DATA USED" "DATA LIMIT" "STATUS"
+    echo -e "${CYAN}--------------------------------------------------------------------${NC}"
+
+    mkdir -p /etc/raretriccks/users
+
+    for conf in /etc/raretriccks/users/*.conf; do
+        [[ -e "$conf" ]] || continue
+        local uname=$(basename "$conf" .conf)
+        local limit=$(grep "^GB_LIMIT=" "$conf" | cut -d= -f2)
+        local ip_l=$(grep "^IP_LIMIT=" "$conf" | cut -d= -f2)
+        local used_mb=$(grep "^USED_MB=" "$conf" | cut -d= -f2)
+
+        [[ -z "$limit" ]] && limit="Unlimited"
+        [[ -z "$ip_l" ]] && ip_l="1"
+        [[ -z "$used_mb" ]] && used_mb="0"
+
+        local used_gb=$(python3 -c "print(f'{$used_mb/1024:.2f}')")
+
+        local status="${GREEN}Active${NC}"
+        if id "$uname" &>/dev/null; then
+            if passwd -S "$uname" 2>/dev/null | grep -q "L"; then
+                status="${RED}LOCKED${NC}"
+            fi
         else
-            sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
-            passwd -u "$uname" &>/dev/null
-            echo -e "${GREEN}[SUCCESS] SSH IP limit updated to ${newip} & account auto-unlocked.${NC}"
+            status="${RED}Deleted${NC}"
         fi
-    elif [[ "$at" == "2" ]]; then
-        local conf="${V2USERS_DIR}/${uname}.conf"
-        if [[ ! -f "$conf" ]]; then
-            echo -e "${RED}[ERROR] V2Ray user conf nahi mila.${NC}"
-        else
-            sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
-            v2ray_unlock_user "$uname"
-            echo -e "${GREEN}[SUCCESS] V2Ray IP limit updated to ${newip} & user auto-unlocked.${NC}"
-        fi
-    else
-        echo -e "${RED}[ERROR] Invalid account type.${NC}"
-    fi
+
+        printf " %-14s | %-8s | %-7s GB | %-9s GB | %b\n" "$uname" "$ip_l" "$used_gb" "$limit" "$status"
+    done
+
+    echo -e "${CYAN}====================================================================${NC}"
     press_any_key
 }
 
-modify_gb_limit_option() {
-    clear
-    echo -e "${CYAN}--- Extend / Modify GB Data Quota (Auto Unlock) ---${NC}"
-    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
-    read -rp "Username: " uname
-    read -rp "New GB Limit (e.g. 20 or Unlimited): " newgb
-    read -rp "Reset used-data counter to 0? (y/n): " doreset
-
-    if [[ "$at" == "1" ]]; then
-        local conf="${USERS_DIR}/${uname}.conf"
-        if [[ ! -f "$conf" ]]; then
-            echo -e "${RED}[ERROR] SSH user conf nahi mila.${NC}"
-        else
-            sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
-            [[ "$doreset" == "y" || "$doreset" == "Y" ]] && sed -i "s/^USED_MB=.*/USED_MB=0.0/" "$conf"
-            passwd -u "$uname" &>/dev/null
-            echo -e "${GREEN}[SUCCESS] SSH GB quota updated & account auto-unlocked.${NC}"
-        fi
-    elif [[ "$at" == "2" ]]; then
-        local conf="${V2USERS_DIR}/${uname}.conf"
-        if [[ ! -f "$conf" ]]; then
-            echo -e "${RED}[ERROR] V2Ray user conf nahi mila.${NC}"
-        else
-            sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
-            [[ "$doreset" == "y" || "$doreset" == "Y" ]] && sed -i "s/^USED_MB=.*/USED_MB=0.0/" "$conf"
-            v2ray_unlock_user "$uname"
-            echo -e "${GREEN}[SUCCESS] V2Ray GB quota updated & user auto-unlocked.${NC}"
-        fi
-    else
-        echo -e "${RED}[ERROR] Invalid account type.${NC}"
-    fi
-    press_any_key
-}
-
-user_management_menu() {
+user_menu() {
+    local cur_dom=$(get_domain)
     while true; do
         clear
         echo -e "${CYAN}====================================================${NC}"
-        echo -e "${YELLOW}       RareTriccks VPN Panel - USER MANAGEMENT     ${NC}"
+        echo -e "${YELLOW}       ${PANEL_NAME} - USER MANAGEMENT           ${NC}"
         echo -e "${CYAN}====================================================${NC}"
         echo -e " 1) Add New User"
         echo -e " 2) Delete User"
@@ -1673,48 +1422,361 @@ user_management_menu() {
         echo -e " 7) Extend / Modify GB Data Quota (Auto Unlock)"
         echo -e " 8) Back to Main Menu"
         echo -e "${CYAN}====================================================${NC}"
-        read -rp "Select Option [1-8]: " u_opt
+        read -rp "Option [1-8]: " u_choice
 
-        case $u_opt in
+        case $u_choice in
             1)
-                read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
-                case "$at" in
-                    1) ssh_add_user_flow ;;
-                    2) v2ray_add_user_flow ;;
-                    *) echo -e "${RED}Invalid type.${NC}"; press_any_key ;;
-                esac
+                read -rp "Username: " username
+                read -rp "Password: " password
+                read -rp "Days Expiry (e.g. 30): " days
+                read -rp "Max IP Limit (e.g. 1 ya 2): " ip_limit
+                read -rp "Quota / Data Limit in GB (e.g. 0.5 ya 50): " gb_limit
+
+                exp_date=$(date -d "+$days days" +%Y-%m-%d)
+
+                useradd -M -s /bin/bash -e "$exp_date" "$username"
+                if [[ $? -ne 0 ]]; then
+                    echo -e "${RED}[ERROR] User create nahi hua! Upar wala error dekhein (username already exists ho sakta hai).${NC}"
+                    press_any_key
+                    continue
+                fi
+                echo "$username:$password" | chpasswd
+                if [[ $? -ne 0 ]]; then
+                    echo -e "${RED}[ERROR] Password set nahi hua!${NC}"
+                fi
+
+                mkdir -p /etc/raretriccks/users
+                echo "IP_LIMIT=$ip_limit" > "/etc/raretriccks/users/${username}.conf"
+                echo "GB_LIMIT=$gb_limit" >> "/etc/raretriccks/users/${username}.conf"
+                echo "USED_MB=0.0" >> "/etc/raretriccks/users/${username}.conf"
+
+                echo -e "\n${GREEN}====================================================${NC}"
+                echo -e "${YELLOW}           ACCOUNT CREATED BY RARETRICCKS           ${NC}"
+                echo -e "${GREEN}====================================================${NC}"
+                echo -e " Domain       : ${CYAN}${cur_dom}${NC}"
+                echo -e " Username     : ${CYAN}${username}${NC}"
+                echo -e " Password     : ${CYAN}${password}${NC}"
+                echo -e " Expired On   : ${CYAN}${exp_date}${NC}"
+                echo -e " Max IP Limit : ${CYAN}${ip_limit} Device(s)${NC}"
+                echo -e " Data Limit   : ${CYAN}${gb_limit} GB${NC}"
+                echo -e "${CYAN}----------------------------------------------------${NC}"
+                echo -e " SSH Direct   : ${CYAN}22, 109, 447${NC}"
+                echo -e " SSH WS (HTTP): ${CYAN}80${NC}"
+                echo -e " SSH WS (SSL) : ${CYAN}443${NC}"
+                echo -e "${CYAN}----------------------------------------------------${NC}"
+                echo -e " Payload      :"
+                echo -e "${CYAN}GET ${CUSTOM_PATH} HTTP/1.1[crlf]Host: ${cur_dom}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${NC}"
+                echo -e "${CYAN}----------------------------------------------------${NC}"
+                press_any_key
                 ;;
             2)
-                read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
-                case "$at" in
-                    1) ssh_delete_user_flow ;;
-                    2) v2ray_delete_user_flow ;;
-                    *) echo -e "${RED}Invalid type.${NC}"; press_any_key ;;
-                esac
+                echo -e "${CYAN}--- Existing Users ---${NC}"
+                mkdir -p /etc/raretriccks/users
+                local found=0
+                for conf in /etc/raretriccks/users/*.conf; do
+                    [[ -e "$conf" ]] || continue
+                    local uname=$(basename "$conf" .conf)
+                    local exp=$(chage -l "$uname" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+                    [[ -z "$exp" ]] && exp="N/A"
+                    printf "  - %-18s (expires: %s)\n" "$uname" "$exp"
+                    found=1
+                done
+                [[ $found -eq 0 ]] && echo -e "${YELLOW}  Koi user nahi mila.${NC}"
+                echo -e "${CYAN}----------------------${NC}"
+                read -rp "Username to delete: " username
+                if [[ -z "$username" ]]; then
+                    echo -e "${RED}[ERROR] Username khaali nahi chhod sakte!${NC}"
+                    press_any_key
+                    continue
+                fi
+                userdel -f "$username" 2>/dev/null
+                rm -f "/etc/raretriccks/users/${username}.conf"
+                echo -e "${GREEN}User ${username} deleted successfully!${NC}"
+                press_any_key
                 ;;
-            3) check_connected_ips_option ;;
-            4) check_status_quota_option ;;
-            5) renew_expiry_option ;;
-            6) modify_ip_limit_option ;;
-            7) modify_gb_limit_option ;;
+            3) check_connected_ips ;;
+            4) check_gb_usage ;;
+            5)
+                read -rp "Username to Renew: " username
+                if id "$username" &>/dev/null; then
+                    read -rp "Kitne additional days add karne hain? (e.g. 30): " r_days
+                    new_exp=$(date -d "+$r_days days" +%Y-%m-%d)
+                    usermod -e "$new_exp" "$username"
+                    passwd -u "$username" 2>/dev/null
+                    echo -e "${GREEN}[SUCCESS] User ${username} Expiry Extended. New Expiry: ${new_exp}${NC}"
+                else
+                    echo -e "${RED}[ERROR] User exist nahi karta!${NC}"
+                fi
+                press_any_key
+                ;;
+            6)
+                read -rp "Username to change IP Limit: " username
+                if [[ -f "/etc/raretriccks/users/${username}.conf" ]]; then
+                    read -rp "Nayi IP Limit enter karein (e.g. 2 ya 3): " new_ip_l
+                    sed -i "s/IP_LIMIT=.*/IP_LIMIT=${new_ip_l}/g" "/etc/raretriccks/users/${username}.conf"
+                    passwd -u "$username" 2>/dev/null
+                    echo -e "${GREEN}[SUCCESS] IP limit updated to ${new_ip_l} Device(s).${NC}"
+                    echo -e "${GREEN}[INFO] Account ${username} is now UNLOCKED and Active!${NC}"
+                else
+                    echo -e "${RED}[ERROR] User config nahi mili!${NC}"
+                fi
+                press_any_key
+                ;;
+            7)
+                read -rp "Username to extend GB limit: " username
+                if [[ -f "/etc/raretriccks/users/${username}.conf" ]]; then
+                    read -rp "Naya Data Limit GB me enter karein (e.g. 1 ya 50): " new_gb
+                    sed -i "s/GB_LIMIT=.*/GB_LIMIT=${new_gb}/g" "/etc/raretriccks/users/${username}.conf"
+                    passwd -u "$username" 2>/dev/null
+                    echo -e "${GREEN}[SUCCESS] GB Limit updated to ${new_gb} GB.${NC}"
+                    echo -e "${GREEN}[INFO] Account ${username} is now UNLOCKED and Active!${NC}"
+                else
+                    echo -e "${RED}[ERROR] User config nahi mili!${NC}"
+                fi
+                press_any_key
+                ;;
             8) return ;;
-            *) echo -e "${RED}Invalid option.${NC}"; press_any_key ;;
+            *) echo "Invalid Option"; sleep 1 ;;
         esac
     done
 }
 
+status_check() {
+    clear
+    local current_dom=$(get_domain)
+    local nginx_status=$(systemctl is-active nginx 2>/dev/null)
+    local ssh_status=$(systemctl is-active ssh 2>/dev/null)
+    local ws_status=$(systemctl is-active ws-proxy 2>/dev/null)
+    local ak_status=$(systemctl is-active autokill 2>/dev/null)
+
+    local ngx_badge="${RED}[ INACTIVE ]${NC}"
+    local ssh_badge="${RED}[ INACTIVE ]${NC}"
+    local ws_badge="${RED}[ INACTIVE ]${NC}"
+    local ak_badge="${RED}[ INACTIVE ]${NC}"
+
+    [[ "$nginx_status" == "active" ]] && ngx_badge="${GREEN}[ ACTIVE ]${NC}"
+    [[ "$ssh_status" == "active" ]] && ssh_badge="${GREEN}[ ACTIVE ]${NC}"
+    [[ "$ws_status" == "active" ]] && ws_badge="${GREEN}[ ACTIVE ]${NC}"
+    [[ "$ak_status" == "active" ]] && ak_badge="${GREEN}[ ACTIVE ]${NC}"
+
+    echo -e "${CYAN}====================================================================${NC}"
+    echo -e "${YELLOW}${BOLD}                     SYSTEM & PROTOCOL STATUS                       ${NC}"
+    echo -e "${CYAN}====================================================================${NC}"
+    echo -e " Target Domain : ${BOLD}${current_dom}${NC}"
+    echo -e " Active Path   : ${BOLD}${CUSTOM_PATH}${NC}\n"
+
+    echo -e "${CYAN} SERVICES STATUS${NC}"
+    echo -e "${CYAN} ------------------------------------------------------------------${NC}"
+    printf "   %-28s : %b\n" "Nginx SSL Proxy Engine" "$ngx_badge"
+    printf "   %-28s : %b\n" "OpenSSH Core" "$ssh_badge"
+    printf "   %-28s : %b\n" "Python WebSocket Service" "$ws_badge"
+    printf "   %-28s : %b\n" "Auto-Lock & Bandwidth Daemon" "$ak_badge"
+    echo ""
+
+    echo -e "${CYAN}====================================================================${NC}"
+    press_any_key
+}
+
+set_banner() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}       ${PANEL_NAME} - SET SSH / WS BANNER       ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "1) Write HTML / Custom Banner"
+    echo -e "2) View Current Banner"
+    echo -e "3) Reset/Clear Banner"
+    echo -e "4) Back"
+    read -rp "Option [1-4]: " b_opt
+
+    case $b_opt in
+        1)
+            echo -e "${YELLOW}Text banner paste karke [ENTER] dabayein (Ending line par END likhein):${NC}"
+            > $BANNER_FILE
+            while IFS= read -r line; do
+                [[ $line == "END" ]] && break
+                echo "$line" >> $BANNER_FILE
+            done
+            systemctl restart ssh
+            echo -e "${GREEN}[SUCCESS] Banner updated!${NC}"
+            press_any_key
+            ;;
+        2)
+            clear
+            echo -e "${CYAN}--- Current SSH Banner ---${NC}"
+            cat $BANNER_FILE
+            press_any_key
+            ;;
+        3)
+            echo "" > $BANNER_FILE
+            systemctl restart ssh
+            echo -e "${GREEN}Banner cleared!${NC}"
+            press_any_key
+            ;;
+        *) return ;;
+    esac
+}
+
+fix_websocket() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}       FIXING SSH WS & WS+SSL ENGINE               ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+
+    fuser -k 109/tcp 2>/dev/null
+    fix_openssh_core
+    systemctl restart ws-proxy
+    install_python_tracker
+    apply_nginx_config
+
+    echo -e "\n${GREEN}[COMPLETED] WebSocket System & Bandwidth Engine Active!${NC}"
+    press_any_key
+}
+
+setup_telegram_bot() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}       ${PANEL_NAME} - TELEGRAM BOT SETUP          ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e " 1) Install / Configure Bot (Token + Super Admin ID)"
+    echo -e " 2) Restart Bot Service"
+    echo -e " 3) Stop Bot Service"
+    echo -e " 4) View Bot Status"
+    echo -e " 5) Back"
+    echo -e "${CYAN}====================================================${NC}"
+    read -rp "Option [1-5]: " tb_opt
+
+    case $tb_opt in
+        1)
+            echo -e "${YELLOW}Tip: Bot Token @BotFather se milta hai. Apna Telegram User ID @userinfobot se maloom karein.${NC}"
+            read -rp "Telegram Bot Token enter karein: " bot_token
+            read -rp "Apna Telegram User ID enter karein (yeh Super Admin banega): " super_id
+
+            if [[ -z "$bot_token" || -z "$super_id" ]]; then
+                echo -e "${RED}[ERROR] Token aur ID dono zaroori hain!${NC}"
+                press_any_key
+                return
+            fi
+            if ! [[ "$super_id" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}[ERROR] User ID sirf numbers ka hona chahiye!${NC}"
+                press_any_key
+                return
+            fi
+
+            echo -e "${BLUE}[1/5] Installing Python & venv...${NC}"
+            apt install -y python3 python3-venv python3-pip
+
+            echo -e "${BLUE}[2/5] Creating isolated virtual environment...${NC}"
+            rm -rf /opt/rr-tgbot-venv
+            python3 -m venv /opt/rr-tgbot-venv
+            /opt/rr-tgbot-venv/bin/pip install --upgrade pip
+            /opt/rr-tgbot-venv/bin/pip install "python-telegram-bot==20.7"
+
+            if [[ $? -ne 0 ]]; then
+                echo -e "${RED}[ERROR] Bot dependencies install nahi hui! Internet connection ya apt sources check karein.${NC}"
+                press_any_key
+                return
+            fi
+
+            echo -e "${BLUE}[3/5] Writing config...${NC}"
+            mkdir -p /etc/raretriccks/tgbot
+            cat << CFG_EOF > /etc/raretriccks/tgbot/config.json
+{"token": "${bot_token}", "super_admin": ${super_id}}
+CFG_EOF
+            echo "[${super_id}]" > /etc/raretriccks/tgbot/admins.json
+
+            echo -e "${BLUE}[4/5] Installing bot script...${NC}"
+            install_tgbot_script
+
+            echo -e "${BLUE}[5/5] Starting Telegram bot service...${NC}"
+            systemctl daemon-reload
+            systemctl enable tgbot
+            systemctl restart tgbot
+
+            echo -e "\n${GREEN}[SUCCESS] Telegram Bot Active! Apne bot ko Telegram par /start bhejein.${NC}"
+            echo -e "${CYAN}Sirf aapki ID (${super_id}) ke paas Admin Management access hoga.${NC}"
+            press_any_key
+            ;;
+        2)
+            systemctl restart tgbot
+            echo -e "${GREEN}Bot restarted.${NC}"
+            press_any_key
+            ;;
+        3)
+            systemctl stop tgbot
+            echo -e "${YELLOW}Bot stopped.${NC}"
+            press_any_key
+            ;;
+        4)
+            clear
+            systemctl status tgbot --no-pager
+            press_any_key
+            ;;
+        *) return ;;
+    esac
+}
+
 uninstall_panel() {
     clear
-    read -rp "Confirm karne ke liye 'YES' likhein: " confirm
-    [[ "$confirm" != "YES" ]] && return
+    echo -e "${RED}${BOLD}====================================================================${NC}"
+    echo -e "${RED}${BOLD}               UNINSTALL RARETRICCKS VPN PANEL                      ${NC}"
+    echo -e "${RED}${BOLD}====================================================================${NC}"
+    echo -e "${YELLOW}Yeh operation ye sab permanently remove kar dega:${NC}"
+    echo -e "  - WebSocket Proxy & Auto-Kill systemd services"
+    echo -e "  - Telegram Bot service aur config"
+    echo -e "  - Nginx VPN reverse-proxy config"
+    echo -e "  - Saare panel-created SSH users aur unki config files"
+    echo -e "  - Domain config aur SSH banner reset"
+    echo -e "  - Menu command khud (/usr/local/bin/menu, /usr/bin/menu)"
+    echo -e "${RED}Yeh action UNDO nahi ho sakta!${NC}\n"
+    read -rp "Confirm karne ke liye 'YES' likhein (case-sensitive): " confirm
 
-    systemctl stop ws-proxy autokill dropbear nginx xray badvpn slowdns 2>/dev/null
-    systemctl disable ws-proxy autokill dropbear nginx xray badvpn slowdns 2>/dev/null
-    rm -f /etc/systemd/system/ws-proxy.service /etc/systemd/system/autokill.service /etc/systemd/system/badvpn.service /etc/systemd/system/slowdns.service
-    rm -f /usr/local/bin/ws-proxy.py /usr/local/bin/autokill.py /usr/local/bin/badvpn-udpgw /usr/local/bin/dns-server
-    rm -f "$NGINX_CONF" "$XRAY_CONFIG"
-    rm -rf /etc/raretriccks /etc/slowdns
+    if [[ "$confirm" != "YES" ]]; then
+        echo -e "${YELLOW}Uninstall cancel kar diya gaya.${NC}"
+        press_any_key
+        return
+    fi
+
+    echo -e "\n${BLUE}[1/6] Stopping & disabling services...${NC}"
+    systemctl stop ws-proxy 2>/dev/null
+    systemctl stop autokill 2>/dev/null
+    systemctl stop tgbot 2>/dev/null
+    systemctl disable ws-proxy 2>/dev/null
+    systemctl disable autokill 2>/dev/null
+    systemctl disable tgbot 2>/dev/null
+
+    echo -e "${BLUE}[2/6] Removing systemd service files...${NC}"
+    rm -f /etc/systemd/system/ws-proxy.service
+    rm -f /etc/systemd/system/autokill.service
+    rm -f /etc/systemd/system/tgbot.service
+    systemctl daemon-reload
+
+    echo -e "${BLUE}[3/6] Removing panel scripts...${NC}"
+    rm -f /usr/local/bin/ws-proxy.py
+    rm -f /usr/local/bin/autokill.py
+    rm -f /usr/local/bin/tgbot.py
+    rm -rf /opt/rr-tgbot-venv
+
+    echo -e "${BLUE}[4/6] Removing Nginx VPN config...${NC}"
+    rm -f /etc/nginx/conf.d/vpn.conf
+    systemctl restart nginx 2>/dev/null
+
+    echo -e "${BLUE}[5/6] Removing all panel-created SSH users...${NC}"
+    if [[ -d /etc/raretriccks/users ]]; then
+        for conf in /etc/raretriccks/users/*.conf; do
+            [[ -e "$conf" ]] || continue
+            local uname=$(basename "$conf" .conf)
+            userdel -f "$uname" 2>/dev/null
+        done
+    fi
+    rm -rf /etc/raretriccks
+
+    echo -e "${BLUE}[6/6] Removing menu command...${NC}"
     echo -e "${GREEN}[SUCCESS] Uninstall complete.${NC}"
+    echo -e "${YELLOW}[NOTE] Nginx, OpenSSH, Certbot packages khud remove nahi kiye gaye.${NC}"
+    echo -e "${YELLOW}       Poori tarah hataane ke liye manually chalayein: apt remove --purge nginx openssh-server certbot${NC}"
+    echo -e "\n${YELLOW}Panel band ho raha hai...${NC}"
+    sleep 2
+    rm -f /usr/local/bin/menu /usr/bin/menu
     exit 0
 }
 
@@ -1723,19 +1785,19 @@ while true; do
     CURRENT_DOM=$(get_domain)
     echo -e "${CYAN}====================================================${NC}"
     echo -e "${GREEN}              ${PANEL_NAME}                       ${NC}"
-    echo -e "${CYAN}              Build: ${PANEL_VERSION}${NC}"
     echo -e "${CYAN}====================================================${NC}"
     echo -e " Domain Target: ${YELLOW}${CURRENT_DOM}${NC}"
+    echo -e " Custom Path  : ${YELLOW}${CUSTOM_PATH}${NC}"
     echo -e "${CYAN}----------------------------------------------------${NC}"
-    echo -e " 1) Auto Install System Components (BadVPN Built-in)"
+    echo -e " 1) Auto Install System Components"
     echo -e " 2) Add / Change Domain Name"
-    echo -e " 3) Issue SSL Certificate (Let's Encrypt)"
-    echo -e " 4) V2Ray / Xray Management (WS)"
-    echo -e " 5) SSH / WS Account Management"
-    echo -e " 6) SlowDNS Management (SSH over DNS)"
-    echo -e " 7) User Management (Add/Delete/IPs/Quota/Expiry)"
-    echo -e " 8) Check Status & Ports"
-    echo -e " 9) Uninstall Panel"
+    echo -e " 3) Issue SSL Certificate"
+    echo -e " 4) Manage Accounts (Add/Delete/Renew/Limits)"
+    echo -e " 5) Check Status & Ports"
+    echo -e " 6) Set / Edit SSH Banner"
+    echo -e " 7) Fix SSH WS & WS+SSL Connection"
+    echo -e " 8) Setup / Manage Telegram Bot"
+    echo -e " 9) ${RED}Uninstall Panel (Remove All Components)${NC}"
     echo -e " 10) Exit Panel"
     echo -e "${CYAN}====================================================${NC}"
     read -rp "Select Option [1-10]: " opt
@@ -1744,12 +1806,13 @@ while true; do
         1) install_all_components ;;
         2) add_domain_option ;;
         3) setup_ssl ;;
-        4) v2ray_menu ;;
-        5) ssh_menu ;;
-        6) slowdns_menu ;;
-        7) user_management_menu ;;
-        8) status_check ;;
+        4) user_menu ;;
+        5) status_check ;;
+        6) set_banner ;;
+        7) fix_websocket ;;
+        8) setup_telegram_bot ;;
         9) uninstall_panel ;;
         10) exit 0 ;;
+        *) echo "Invalid option"; sleep 1 ;;
     esac
 done
