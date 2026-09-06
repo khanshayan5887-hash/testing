@@ -1,8 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# Script Name   : RareTriccks Multi-Protocol VPN Panel (Direct SSL & Split Menus)
-# Version       : 2026-09-05-direct-ssl-fixed-v2
-# Ports         : 80 (Plain), 443 (Direct SSL & Nginx SNI Multiplexing), 7300 (BadVPN UDPGW)
+# Script Name   : RareTriccks Multi-Protocol VPN Panel (Auth Fixed Edition)
+# Ports         : 80 (Plain), 443 (TLS), 7300 (BadVPN UDPGW)
 # ==============================================================================
 
 RED='\033[0;31m'
@@ -13,15 +12,14 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-PANEL_NAME="RareTriccks VPN Panel (Direct SSL Edition)"
-PANEL_VERSION="2026-09-05-direct-ssl-fixed-v2"
+PANEL_NAME="RareTriccks VPN Panel (Auth Fixed)"
+PANEL_VERSION="2026-08-31-fixed"
 BANNER_FILE="/etc/issue.net"
 DOMAIN_FILE="/etc/raretriccks/domain.conf"
 WILDCARD_FILE="/etc/raretriccks/wildcard.conf"
 USERS_DIR="/etc/raretriccks/users"
 V2USERS_DIR="/etc/raretriccks/v2users"
 NGINX_CONF="/etc/nginx/conf.d/raretriccks.conf"
-NGINX_STREAM_CONF="/etc/nginx/raretriccks_stream.conf"
 XRAY_ACCESS_LOG="/var/log/xray/access.log"
 XRAY_API_ADDR="127.0.0.1:10085"
 SLOWDNS_DIR="/etc/slowdns"
@@ -32,24 +30,6 @@ SLOWDNS_BIN="/usr/local/bin/dns-server"
 SLOWDNS_UDP_PORT=53
 SLOWDNS_FORWARD_HOST="127.0.0.1"
 SLOWDNS_FORWARD_PORT=109
-
-WS_SSH_PORT=2082          
-XRAY_WS_TLS_PORT=20001    
-XRAY_WS_PLAIN_PORT=20002  
-XRAY_GRPC_PORT=20005
-XRAY_XHTTP_PORT=8443
-XRAY_TCP_PLAIN_PORT=8880
-XRAY_TCP_TLS_PORT=8444
-BADVPN_PORT=7300
-
-V2RAY_WS_PATH="/v2ray"
-V2RAY_XHTTP_PATH="/vless-xhttp"
-V2RAY_GRPC_SERVICE="vless-grpc"
-
-XRAY_CERT_DIR="/etc/xray/certs"
-XRAY_CERT_FILE="${XRAY_CERT_DIR}/fullchain.pem"
-XRAY_KEY_FILE="${XRAY_CERT_DIR}/privkey.pem"
-XRAY_SVC_USER="xray"
 
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}[ERROR] Yeh script ROOT privilege ke sath chalaen! (sudo -i)${NC}"
@@ -76,7 +56,7 @@ get_cert_domain() {
 }
 
 press_any_key() {
-    echo -e "\n${YELLOW}Press [ENTER] key to return...${NC}"
+    echo -e "\n${YELLOW}Press [ENTER] key to return to main menu...${NC}"
     read -r
 }
 
@@ -102,6 +82,7 @@ wait_for_port() {
 
 install_badvpn_udpgw() {
     echo -e "${BLUE}[+] Installing & Auto-Starting BadVPN UDP Gateway for Gaming & Calls...${NC}"
+    
     if [[ ! -f /usr/local/bin/badvpn-udpgw ]]; then
         wget -O /usr/local/bin/badvpn-udpgw https://github.com/ambrop72/badvpn/raw/master/udpgw/badvpn-udpgw 2>/dev/null || true
         if [[ ! -f /usr/local/bin/badvpn-udpgw ]]; then
@@ -111,7 +92,7 @@ install_badvpn_udpgw() {
             fi
             if [[ -d /tmp/badvpn ]]; then
                 mkdir -p /tmp/badvpn/build
-                cd /tmp/badvpn/build || exit
+                cd /tmp/badvpn/build
                 cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 &>/dev/null
                 make install &>/dev/null || true
                 cd ~
@@ -185,6 +166,8 @@ get_ns_domain() {
     fi
 }
 
+# Port 53/UDP is almost always already held by systemd-resolved's stub listener.
+# This is the #1 reason SlowDNS "doesn't work" - free it before dns-server starts.
 free_port_53() {
     if ss -uln 2>/dev/null | grep -q ':53 '; then
         if systemctl is-active systemd-resolved &>/dev/null; then
@@ -202,6 +185,7 @@ free_port_53() {
         fi
     fi
 
+    # Anything else still squatting on 53/udp (named, dnsmasq, etc.) - stop it too.
     for svc in named bind9 dnsmasq; do
         systemctl is-active "$svc" &>/dev/null && systemctl stop "$svc" 2>/dev/null && systemctl disable "$svc" 2>/dev/null
     done
@@ -209,25 +193,26 @@ free_port_53() {
 
 install_slowdns_binary() {
     [[ -x "$SLOWDNS_BIN" ]] && return 0
-    echo -e "${BLUE}[+] Installing SlowDNS (dnstt-server) binary...${NC}"
-    apt install -y golang-go git build-essential &>/dev/null
-    export GIT_TERMINAL_PROMPT=0
-    rm -rf /tmp/dnstt-src
 
-    if ! git clone https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt-src &>/tmp/slowdns_clone.log; then
-        echo -e "${RED}[ERROR] dnstt source clone fail ho gaya.${NC}"
-        cat /tmp/slowdns_clone.log
-        return 1
+    echo -e "${BLUE}[+] Installing SlowDNS (dns-server) binary...${NC}"
+    apt install -y golang-go git build-essential &>/dev/null
+
+    if [[ ! -d /tmp/slowdns-src ]]; then
+        git clone https://github.com/sh4hin/SlowDNS.git /tmp/slowdns-src &>/dev/null || \
+        git clone https://github.com/eightbitlabs/slowdns.git /tmp/slowdns-src &>/dev/null || true
     fi
 
-    (
-        cd /tmp/dnstt-src/dnstt-server || exit 1
-        go build -o "$SLOWDNS_BIN" . 2>/tmp/slowdns_build.log
-    )
+    if [[ -d /tmp/slowdns-src ]]; then
+        (
+            cd /tmp/slowdns-src || exit 1
+            go build -o "$SLOWDNS_BIN" . 2>/tmp/slowdns_build.log || \
+            go build -o "$SLOWDNS_BIN" ./server 2>>/tmp/slowdns_build.log || true
+        )
+    fi
 
     if [[ ! -x "$SLOWDNS_BIN" ]]; then
-        echo -e "${RED}[ERROR] SlowDNS binary build nahi ho saka.${NC}"
-        cat /tmp/slowdns_build.log 2>/dev/null
+        echo -e "${RED}[ERROR] SlowDNS binary build nahi ho saka. /tmp/slowdns_build.log check karein.${NC}"
+        echo -e "${YELLOW}[HINT] Agar go-build fail ho raha hai, apne provider ka pre-built 'dns-server' binary manually /usr/local/bin/dns-server par daal kar chmod +x kar dein, phir yeh option dobara chalayen.${NC}"
         return 1
     fi
     chmod +x "$SLOWDNS_BIN"
@@ -253,7 +238,7 @@ configure_slowdns_service() {
     local ns_dom
     ns_dom=$(get_ns_domain)
     if [[ -z "$ns_dom" ]]; then
-        echo -e "${RED}[ERROR] NS Domain set nahi hai.${NC}"
+        echo -e "${RED}[ERROR] NS Domain set nahi hai. Pehle SlowDNS menu se 'Set / Change NS Domain' use karein.${NC}"
         return 1
     fi
 
@@ -265,7 +250,7 @@ Description=SlowDNS (SSH over DNS) Tunnel Server
 After=network.target dropbear.service
 
 [Service]
-ExecStart=${SLOWDNS_BIN} -udp :${SLOWDNS_UDP_PORT} -privkey-file ${SLOWDNS_PRIVKEY} ${ns_dom} ${SLOWDNS_FORWARD_HOST}:${SLOWDNS_FORWARD_PORT}
+ExecStart=${SLOWDNS_BIN} -udp :${SLOWDNS_UDP_PORT} -privkey ${SLOWDNS_PRIVKEY} ${ns_dom} ${SLOWDNS_FORWARD_HOST}:${SLOWDNS_FORWARD_PORT}
 Restart=always
 RestartSec=3
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -281,9 +266,9 @@ SD_EOF
 
     sleep 2
     if ss -uln 2>/dev/null | grep -q ":${SLOWDNS_UDP_PORT} "; then
-        echo -e "${GREEN}[OK] SlowDNS UDP/${SLOWDNS_UDP_PORT} active.${NC}"
+        echo -e "${GREEN}[OK] SlowDNS UDP/${SLOWDNS_UDP_PORT} par listening hai.${NC}"
     else
-        echo -e "${RED}[WARN] SlowDNS port ${SLOWDNS_UDP_PORT} par active nahi hai.${NC}"
+        echo -e "${RED}[WARN] SlowDNS port ${SLOWDNS_UDP_PORT} par listen nahi kar raha. 'journalctl -u slowdns -n 50' check karein.${NC}"
     fi
 }
 
@@ -294,14 +279,25 @@ install_slowdns() {
     echo -e "${CYAN}====================================================${NC}"
 
     if [[ -z "$(get_ns_domain)" ]]; then
+        echo -e "${YELLOW}[INFO] NS Domain abhi set nahi hai, pehle wahi set karte hain.${NC}"
         slowdns_set_ns_domain_flow
     fi
 
-    if ! install_slowdns_binary; then press_any_key; return 1; fi
-    if ! slowdns_generate_keys; then press_any_key; return 1; fi
+    if ! install_slowdns_binary; then
+        press_any_key
+        return 1
+    fi
+
+    if ! slowdns_generate_keys; then
+        press_any_key
+        return 1
+    fi
 
     configure_slowdns_service
-    echo -e "${GREEN}[SUCCESS] SlowDNS install complete.${NC}"
+    echo -e "${CYAN}----------------------------------------------------${NC}"
+    echo -e "${GREEN}[SUCCESS] SlowDNS install/configure complete.${NC}"
+    echo -e "${YELLOW}[REMEMBER] SlowDNS wahi SSH/WS accounts (SSH Management se bane) use karta hai -${NC}"
+    echo -e "${YELLOW}           unhi ka GB/IP limit yahan bhi automatically apply hota hai.${NC}"
     press_any_key
 }
 
@@ -310,13 +306,20 @@ slowdns_set_ns_domain_flow() {
     echo -e "${CYAN}====================================================${NC}"
     echo -e "${YELLOW}          SET / CHANGE NS DOMAIN                   ${NC}"
     echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}[IMPORTANT] Yeh koi normal domain nahi hai - yeh ek NS (Nameserver) record hai.${NC}"
+    echo -e " Apne domain registrar/DNS panel me:"
+    echo -e "   1) Ek subdomain banayen, e.g. ${CYAN}ns.yourdomain.com${NC}"
+    echo -e "   2) Uske liye ek ${CYAN}NS record${NC} add karein jiski value ho: ${CYAN}dns.yourdomain.com${NC} (ya isi tarah ka glue domain)"
+    echo -e "   3) Us glue domain (${CYAN}dns.yourdomain.com${NC}) ke liye ek ${CYAN}A record${NC} add karein jo is server ki Public IP par point kare"
+    echo -e " Iske bina SlowDNS kabhi resolve nahi hoga, chahe service chal bhi rahi ho."
+    echo -e "${CYAN}----------------------------------------------------${NC}"
     read -rp "NS Subdomain enter karein (e.g. ns.yourdomain.com): " ns_input
     if [[ -z "$ns_input" ]]; then
         echo -e "${RED}[ERROR] NS domain khaali nahi ho sakta.${NC}"
     else
         mkdir -p "$SLOWDNS_DIR"
         echo "$ns_input" > "$SLOWDNS_NS_FILE"
-        echo -e "${GREEN}[SUCCESS] NS Domain set: ${CYAN}${ns_input}${NC}"
+        echo -e "${GREEN}[SUCCESS] NS Domain set to: ${CYAN}${ns_input}${NC}"
         if [[ -f "$SLOWDNS_PRIVKEY" ]]; then
             configure_slowdns_service
         fi
@@ -338,7 +341,16 @@ slowdns_show_info() {
     echo -e " Server Public IP: ${pubip:-Unknown}"
     echo -e " Public Key     : ${pubkey:-Not Generated}"
     echo -e " UDP Port       : ${SLOWDNS_UDP_PORT}"
+    echo -e " Forwards To    : ${SLOWDNS_FORWARD_HOST}:${SLOWDNS_FORWARD_PORT} (Dropbear SSH)"
+    echo -e "${CYAN}----------------------------------------------------${NC}"
+    echo -e "${YELLOW}Client apps (HTTP Injector / NapsternetV / etc.) me daalna hai:${NC}"
+    echo -e "  DNS Server / NS         : ${ns_dom:-<ns domain not set>}"
+    echo -e "  Public Key              : ${pubkey:-<not generated>}"
+    echo -e "  SSH Username/Password   : koi bhi SSH/WS account (SSH Management se bana hua)"
     echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}[NOTE] GB/IP limits SlowDNS users ke liye alag se track nahi hote - ${NC}"
+    echo -e "${YELLOW}       wahi SSH account ke IP_LIMIT/GB_LIMIT (SSH Management me set) automatically apply hote hain,${NC}"
+    echo -e "${YELLOW}       kyunki SlowDNS traffic bhi isi Dropbear daemon ke through jaata hai.${NC}"
     press_any_key
 }
 
@@ -437,7 +449,9 @@ def get_pid_io_bytes(pid):
 
 last_pid_bytes = {}
 
+
 def xray_strip_client(email):
+    """Remove a client (by email/username) from every inbound in the xray config, then restart."""
     try:
         with open(XRAY_CONFIG, "r") as f:
             cfg = json.load(f)
@@ -456,7 +470,14 @@ def xray_strip_client(email):
     except Exception:
         pass
 
+
 def get_v2ray_delta_mb(email):
+    """
+    Reads (and resets) the per-user traffic counter via xray's gRPC stats API.
+    Requires the 'api'/'stats'/'policy' blocks + api-in inbound added in configure_xray().
+    NOTE: exact CLI flags can differ slightly between xray-core releases -
+    verify with `xray api statsquery --help` on the target box if this stops matching.
+    """
     total_bytes = 0
     try:
         out = subprocess.check_output(
@@ -476,15 +497,18 @@ def get_v2ray_delta_mb(email):
         pass
     return total_bytes / (1024.0 * 1024.0)
 
+
 def get_v2ray_active_ips(email, log_lines):
+    """Approximates 'currently connected' source IPs by scanning the recent xray access log tail."""
     ips = set()
-    needle = f"email: {email}"
+    needle = "email: {}".format(email)
     for line in log_lines:
         if needle in line:
-            m = re.search(r"from\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):", line)
+            m = re.search(r"from (\d+\.\d+\.\d+\.\d+):", line)
             if m:
                 ips.add(m.group(1))
     return ips
+
 
 def process_v2ray_users():
     if not os.path.exists(V2USER_DIR):
@@ -517,6 +541,7 @@ def process_v2ray_users():
                 data[k] = v
 
         if data.get("LOCKED", "0") == "1":
+            # Already locked out - admin must extend limits / unlock via the panel menu
             continue
 
         ip_limit = 0
@@ -566,6 +591,7 @@ def process_v2ray_users():
                     f.write("{}={}\n".format(k, v))
         except Exception:
             pass
+
 
 while True:
     try:
@@ -658,6 +684,23 @@ EOF
     systemctl restart autokill
 }
 
+WS_SSH_PORT=2082          
+XRAY_WS_TLS_PORT=20001    
+XRAY_WS_PLAIN_PORT=20002  
+XRAY_GRPC_PORT=20005
+XRAY_XHTTP_PORT=8443
+XRAY_TCP_PLAIN_PORT=8880
+XRAY_TCP_TLS_PORT=8444
+BADVPN_PORT=7300
+
+V2RAY_WS_PATH="/v2ray"
+V2RAY_XHTTP_PATH="/vless-xhttp"
+V2RAY_GRPC_SERVICE="vless-grpc"
+
+XRAY_CERT_DIR="/etc/xray/certs"
+XRAY_CERT_FILE="${XRAY_CERT_DIR}/fullchain.pem"
+XRAY_KEY_FILE="${XRAY_CERT_DIR}/privkey.pem"
+
 copy_xray_certs() {
     local CERT_DOM=$(get_cert_domain)
     mkdir -p "$XRAY_CERT_DIR"
@@ -718,9 +761,8 @@ NGINX_EOF
     if [[ "$HAVE_SSL" -eq 1 ]]; then
 cat << NGINX_EOF >> "$NGINX_CONF"
 server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
-    http2 on;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name ${MY_DOMAIN};
 
     ssl_certificate /etc/letsencrypt/live/${CERT_DOM}/fullchain.pem;
@@ -750,37 +792,6 @@ server {
     }
 }
 NGINX_EOF
-
-cat << STREAM_EOF > "$NGINX_STREAM_CONF"
-stream {
-    upstream ssh_direct {
-        server 127.0.0.1:109;
-    }
-    upstream web_backend {
-        server 127.0.0.1:8443;
-    }
-
-    map \$ssl_preread_protocol \$backend {
-        "" ssh_direct;
-        default web_backend;
-    }
-
-    server {
-        listen 443;
-        listen [::]:443;
-        proxy_pass \$backend;
-        ssl_preread on;
-    }
-}
-STREAM_EOF
-        if ! grep -q "include $NGINX_STREAM_CONF;" /etc/nginx/nginx.conf; then
-            # Inject stream block safely before the last closing brace or at the top level
-            if grep -q "http {" /etc/nginx/nginx.conf; then
-                sed -i '0,/http {/{s/http {/include '"$NGINX_STREAM_CONF"';\n\nhttp {/}}' /etc/nginx/nginx.conf
-            else
-                echo "include $NGINX_STREAM_CONF;" >> /etc/nginx/nginx.conf
-            fi
-        fi
     fi
 
     nginx -t &>/tmp/nginx_check.log
@@ -794,7 +805,7 @@ STREAM_EOF
     systemctl restart nginx
     wait_for_port 127.0.0.1 80 "Nginx (80)" 10
     if [[ "$HAVE_SSL" -eq 1 ]]; then
-        wait_for_port 127.0.0.1 443 "Nginx Direct Multiplexer (443)" 10
+        wait_for_port 127.0.0.1 443 "Nginx (443, TLS)" 10
     fi
 }
 
@@ -803,14 +814,14 @@ add_domain_option() {
     echo -e "${CYAN}====================================================${NC}"
     echo -e "${YELLOW}        ADD / CHANGE DOMAIN NAME                    ${NC}"
     echo -e "${CYAN}====================================================${NC}"
-    read -rp " Apna Domain Enter Karein (e.g. vpn.domain.com): " new_dom
+    read -rp " Apna Domain Enter Karein (e.g. freebasics676.raretriccks.store): " new_dom
 
     if [[ -z "$new_dom" ]]; then
         echo -e "${RED}[ERROR] Domain khaali nahi chhod sakte!${NC}"
     else
         mkdir -p /etc/raretriccks
         echo "$new_dom" > "$DOMAIN_FILE"
-        echo -e "\n${GREEN}[SUCCESS] Domain set to: ${CYAN}${new_dom}${NC}"
+        echo -e "\n${GREEN}[SUCCESS] Domain successfully set to: ${CYAN}${new_dom}${NC}"
         configure_nginx_proxy
     fi
     press_any_key
@@ -837,13 +848,13 @@ cat << 'EOF' > $BANNER_FILE
 EOF
 
     fix_dropbear_core
-    sed -i 's/#Banner none/Banner \/etc\/issue.net/g' /etc/ssh/sshd_config 2>/dev/null || true
-    systemctl restart ssh 2>/dev/null || true
+    sed -i 's/#Banner none/Banner \/etc\/issue.net/g' /etc/ssh/sshd_config
+    systemctl restart ssh
 
-    echo -e "${BLUE}[4/8] Installing BadVPN UDP Gateway...${NC}"
+    echo -e "${BLUE}[4/8] Installing BadVPN UDP Gateway (Gaming/Calls)...${NC}"
     install_badvpn_udpgw
 
-    echo -e "${BLUE}[5/8] Creating Python WebSocket Service (Split & Buffer Fixed)...${NC}"
+    echo -e "${BLUE}[5/8] Creating Python WebSocket Service...${NC}"
 cat << 'EOF' > /usr/local/bin/ws-proxy.py
 import socket, threading, select, time
 
@@ -863,7 +874,7 @@ def handle_client(client_socket, client_addr):
     real_ip = client_addr[0]
     try:
         client_socket.settimeout(10)
-        request_raw = client_socket.recv(8192)
+        request_raw = client_socket.recv(4096)
         if not request_raw:
             client_socket.close()
             return
@@ -897,10 +908,7 @@ def handle_client(client_socket, client_addr):
     except Exception:
         pass
     finally:
-        try: client_socket.close()
-        except: pass
-        try: target_socket.close()
-        except: pass
+        client_socket.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -936,21 +944,26 @@ EOF
         configure_xray
         configure_nginx_proxy
     else
-        echo -e "${RED}[ERROR] Xray-core install fail ho gaya.${NC}"
+        echo -e "${RED}[ERROR] Xray-core install fail ho gaya, Nginx proxy skip kiya ja raha hai.${NC}"
     fi
 
     echo -e "${BLUE}[7/8] Installing Bandwidth Tracking Engine...${NC}"
     install_python_tracker
 
-    echo -e "${BLUE}[8/8] SlowDNS Setup...${NC}"
+    echo -e "${BLUE}[8/8] SlowDNS (SSH over DNS)...${NC}"
     if [[ -n "$(get_ns_domain)" ]]; then
         install_slowdns_binary && slowdns_generate_keys && configure_slowdns_service
+    else
+        echo -e "${YELLOW}[SKIP] NS Domain abhi set nahi hai. Install ke baad 'SlowDNS Management' menu se NS Domain set karke install karein.${NC}"
     fi
 
-    echo -e "\n${GREEN}[SUCCESS] All Components Installed Successfully!${NC}"
+    echo -e "\n${GREEN}[SUCCESS] Base components, BadVPN, Xray, Nginx & SlowDNS setup complete!${NC}"
     status_check_inline
     press_any_key
 }
+
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_SVC_USER="xray-svc"
 
 install_xray_core() {
     if ! command -v xray &>/dev/null; then
@@ -959,17 +972,16 @@ install_xray_core() {
     mkdir -p /usr/local/etc/xray
     fix_xray_service_user
     systemctl enable xray &>/dev/null
+    if ! command -v xray &>/dev/null; then
+        echo -e "${RED}[ERROR] Xray binary /usr/local/bin/xray nahi mila. Install script fail ho gaya.${NC}"
+        return 1
+    fi
     return 0
 }
 
 fix_xray_service_user() {
-    # Check current system xray user or fallback safely
-    if id "xray" &>/dev/null; then
-        XRAY_SVC_USER="xray"
-    elif id "nobody" &>/dev/null; then
-        XRAY_SVC_USER="nobody"
-    else
-        XRAY_SVC_USER="root"
+    if ! id "$XRAY_SVC_USER" &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$XRAY_SVC_USER" 2>/dev/null
     fi
 
     local unit="/etc/systemd/system/xray.service"
@@ -978,6 +990,11 @@ fix_xray_service_user() {
             sed -i "s/^User=.*/User=${XRAY_SVC_USER}/" "$unit"
         else
             sed -i "/\[Service\]/a User=${XRAY_SVC_USER}" "$unit"
+        fi
+        if grep -q '^Group=' "$unit"; then
+            sed -i "s/^Group=.*/Group=${XRAY_SVC_USER}/" "$unit"
+        else
+            sed -i "/\[Service\]/a Group=${XRAY_SVC_USER}" "$unit"
         fi
         systemctl daemon-reload
     fi
@@ -993,7 +1010,7 @@ configure_xray() {
     local KEY_FILE="$XRAY_KEY_FILE"
 
     mkdir -p /var/log/xray
-    chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || true
+    chown -R "${XRAY_SVC_USER}:${XRAY_SVC_USER}" /var/log/xray 2>/dev/null || chown -R nobody:nogroup /var/log/xray
 
 cat << XR_EOF > "$XRAY_CONFIG"
 {
@@ -1018,7 +1035,7 @@ cat << XR_EOF > "$XRAY_CONFIG"
       "port": ${XRAY_WS_TLS_PORT},
       "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" }, "acceptProxyProtocol": true }
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" } }
     },
     {
       "tag": "ws-plain-in",
@@ -1026,7 +1043,7 @@ cat << XR_EOF > "$XRAY_CONFIG"
       "port": ${XRAY_WS_PLAIN_PORT},
       "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" }, "acceptProxyProtocol": true }
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "${V2RAY_WS_PATH}" } }
     },
     {
       "tag": "xhttp-in",
@@ -1084,11 +1101,18 @@ XR_EOF
         chmod 644 "$XRAY_CONFIG"
     fi
 
+    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
+        echo -e "${RED}[ERROR] Xray config invalid!${NC}"
+        cat /tmp/xray_check.log
+        return 1
+    fi
+
     systemctl restart xray
     wait_for_port 127.0.0.1 "$XRAY_WS_TLS_PORT" "Xray ws-tls-in" 10
     wait_for_port 127.0.0.1 "$XRAY_WS_PLAIN_PORT" "Xray ws-plain-in" 10
 }
 
+# Injects a client into every protocol inbound (used by both new-user add and unlock/re-add)
 v2ray_inject_client() {
     local uname="$1"
     local uuid="$2"
@@ -1096,52 +1120,65 @@ v2ray_inject_client() {
     backup=$(mktemp)
     cp "$XRAY_CONFIG" "$backup"
 
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$uuid" --arg email "$uname" \
-       '(.inbounds[].settings.clients) |= if . != null then . + [{"id": $id, "email": $email}] else . end' \
-       "$XRAY_CONFIG" > "$tmp"
+    for tag in ws-tls-in ws-plain-in xhttp-in tcp-plain-in tcp-tls-in grpc-in; do
+        tmp=$(mktemp)
+        jq --arg tag "$tag" --arg id "$uuid" --arg email "$uname" \
+           '(.inbounds[] | select(.tag==$tag) | .settings.clients) += [{"id": $id, "email": $email}]' \
+           "$XRAY_CONFIG" > "$tmp"
+        if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
+            mv "$tmp" "$XRAY_CONFIG"
+        else
+            rm -f "$tmp"
+            cp "$backup" "$XRAY_CONFIG"
+            rm -f "$backup"
+            return 1
+        fi
+    done
+    chmod 644 "$XRAY_CONFIG"
 
-    if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
-        mv "$tmp" "$XRAY_CONFIG"
-        chmod 644 "$XRAY_CONFIG"
-        rm -f "$backup"
-        timeout 15 systemctl restart xray
-        return 0
-    else
-        rm -f "$tmp"
+    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
         cp "$backup" "$XRAY_CONFIG"
         rm -f "$backup"
+        systemctl restart xray &>/dev/null
         return 1
     fi
+    rm -f "$backup"
+
+    timeout 15 systemctl restart xray
+    return 0
 }
 
+# Removes a client from every protocol inbound (used by delete AND by auto-lock on breach)
 v2ray_strip_client() {
     local uname="$1"
     local backup
     backup=$(mktemp)
     cp "$XRAY_CONFIG" "$backup"
 
-    local tmp
     tmp=$(mktemp)
     jq --arg email "$uname" \
-       '(.inbounds[].settings.clients) |= if . != null then map(select(.email != $email)) else . end' \
+       '(.inbounds[].settings.clients) |= map(select(.email != $email))' \
        "$XRAY_CONFIG" > "$tmp"
-
     if [[ -s "$tmp" ]] && jq empty "$tmp" &>/dev/null; then
         mv "$tmp" "$XRAY_CONFIG"
-        chmod 644 "$XRAY_CONFIG"
-        rm -f "$backup"
-        timeout 15 systemctl restart xray
-        return 0
     else
-        rm -f "$tmp"
-        cp "$backup" "$XRAY_CONFIG"
-        rm -f "$backup"
+        rm -f "$tmp" "$backup"
         return 1
     fi
+    chmod 644 "$XRAY_CONFIG"
+
+    if ! xray run -test -config "$XRAY_CONFIG" &>/tmp/xray_check.log; then
+        cp "$backup" "$XRAY_CONFIG"
+        rm -f "$backup"
+        systemctl restart xray &>/dev/null
+        return 1
+    fi
+    rm -f "$backup"
+
+    timeout 15 systemctl restart xray
 }
 
+# Full add: creates the xray clients AND the limits/quota conf file (mirrors ssh_menu behaviour)
 v2ray_add_user() {
     local uname="$1"
     local uuid="$2"
@@ -1157,7 +1194,7 @@ v2ray_add_user() {
     mkdir -p "$V2USERS_DIR"
     local expire_date="Unlimited"
     if [[ "$exp_days" =~ ^[0-9]+$ && "$exp_days" -gt 0 ]]; then
-        expire_date=$(date -d "+${exp_days} days" +"%Y-%m-%d" 2>/dev/null || date -v+${exp_days}d +"%Y-%m-%d")
+        expire_date=$(date -d "+${exp_days} days" +"%Y-%m-%d")
     fi
 
 cat << V2_EOF > "${V2USERS_DIR}/${uname}.conf"
@@ -1182,6 +1219,7 @@ v2ray_delete_user() {
     return 1
 }
 
+# Re-injects a locked/expired user back into xray using the UUID stored in their conf file
 v2ray_unlock_user() {
     local uname="$1"
     local conf="${V2USERS_DIR}/${uname}.conf"
@@ -1190,6 +1228,7 @@ v2ray_unlock_user() {
     uuid=$(grep '^UUID=' "$conf" | cut -d= -f2)
     [[ -z "$uuid" ]] && return 1
 
+    # Make sure we don't double-inject if somehow still present
     v2ray_strip_client "$uname" &>/dev/null
     if v2ray_inject_client "$uname" "$uuid"; then
         sed -i 's/^LOCKED=.*/LOCKED=0/' "$conf"
@@ -1199,13 +1238,9 @@ v2ray_unlock_user() {
 }
 
 v2ray_list_users() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}           V2RAY ACCOUNTS & USAGE INFO             ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    jq -r '.inbounds[] | select(.tag=="ws-tls-in") | .settings.clients[]? | "User: \(.email) | UUID: \(.id)"' "$XRAY_CONFIG" 2>/dev/null
+    jq -r '.inbounds[] | select(.tag=="ws-tls-in") | .settings.clients[]? | "\(.email)  ->  \(.id)"' "$XRAY_CONFIG" 2>/dev/null
     if [[ -d "$V2USERS_DIR" ]]; then
-        echo -e "\n${CYAN}--- Limits & Bandwidth Usage (V2Ray Users) ---${NC}"
+        echo -e "\n${CYAN}--- Limits / Quota (from conf) ---${NC}"
         for f in "${V2USERS_DIR}"/*.conf; do
             [[ -e "$f" ]] || continue
             local uname ip gb used exp locked
@@ -1215,10 +1250,9 @@ v2ray_list_users() {
             used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
             exp=$(grep '^EXPIRE_DATE=' "$f" | cut -d= -f2)
             locked=$(grep '^LOCKED=' "$f" | cut -d= -f2)
-            echo -e " User: ${uname} | IP Limit: ${ip} | GB Limit: ${gb} | Used: ${used} MB | Expiry: ${exp} | Locked: ${locked}"
+            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRE=${exp} LOCKED=${locked}"
         done
     fi
-    press_any_key
 }
 
 v2ray_add_user_flow() {
@@ -1240,89 +1274,50 @@ v2ray_add_user_flow() {
     echo -e "${CYAN}UUID          : ${gen_uuid}${NC}"
     echo -e "${CYAN}IP Limit      : ${vip:-0}${NC}"
     echo -e "${CYAN}GB Limit      : ${vgb:-Unlimited}${NC}"
+    echo -e "${CYAN}BadVPN UDPGW  : 127.0.0.1:${BADVPN_PORT} (Built-in active for Gaming & Calls)${NC}"
     echo -e "${CYAN}----------------------------------------------------${NC}"
     echo -e "${GREEN}Link WS TLS       :${NC} vless://${gen_uuid}@${MY_DOMAIN}:443?type=ws&encryption=none&security=tls&host=${MY_DOMAIN}&path=${V2RAY_WS_PATH}#XRAY_VLESS_WS_${vu}"
     echo -e "${GREEN}Link WS NoTLS     :${NC} vless://${gen_uuid}@${MY_DOMAIN}:80?type=ws&encryption=none&security=none&host=${MY_DOMAIN}&path=${V2RAY_WS_PATH}#XRAY_VLESS_WS_${vu}"
+    echo -e "${GREEN}Link XHTTP (TLS)  :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_XHTTP_PORT}?type=xhttp&encryption=none&security=tls&host=${MY_DOMAIN}&path=${V2RAY_XHTTP_PATH}&mode=auto#XRAY_VLESS_XHTTP_${vu}"
+    echo -e "${GREEN}Link TCP (Plain)  :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_TCP_PLAIN_PORT}?type=tcp&encryption=none&security=none#XRAY_VLESS_TCP_${vu}"
+    echo -e "${GREEN}Link TCP (TLS)    :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_TCP_TLS_PORT}?type=tcp&encryption=none&security=tls&host=${MY_DOMAIN}#XRAY_VLESS_TCP_TLS_${vu}"
+    echo -e "${GREEN}Link gRPC         :${NC} vless://${gen_uuid}@${MY_DOMAIN}:${XRAY_GRPC_PORT}?type=grpc&encryption=none&security=none&serviceName=${V2RAY_GRPC_SERVICE}#XRAY_VLESS_GRPC_${vu}"
     echo -e "${CYAN}====================================================${NC}"
     press_any_key
 }
 
 v2ray_delete_user_flow() {
-    read -rp "Username to delete: " vu
+    read -rp "Username/Remarks to delete: " vu
     if v2ray_delete_user "$vu"; then
-        echo -e "${GREEN}[SUCCESS] V2Ray User removed.${NC}"
+        echo -e "${GREEN}[SUCCESS] User removed.${NC}"
     else
         echo -e "${RED}[FAILED] User remove nahi ho saka.${NC}"
     fi
     press_any_key
 }
 
-v2ray_check_online_ips() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}     V2RAY / XRAY CONNECTED USERS & REAL IPs       ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    if [[ -f "$XRAY_ACCESS_LOG" ]]; then
-        echo -e "${BLUE}Real IP Connection Logs (Pakistan/Client Public IP):${NC}"
-        grep -oE "from [0-9.]+:[0-9]+ accepted tcp:.* email: [A-Za-z0-9_.-]+" "$XRAY_ACCESS_LOG" | tail -n 30
-    else
-        echo -e "${YELLOW}Access log unavailable.${NC}"
-    fi
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
-
-v2ray_modify_limits() {
-    clear
-    echo -e "${CYAN}--- Modify V2Ray Limits & Quota ---${NC}"
-    read -rp "Username: " uname
-    local conf="${V2USERS_DIR}/${uname}.conf"
-    if [[ ! -f "$conf" ]]; then
-        echo -e "${RED}[ERROR] User not found!${NC}"
-        press_any_key
-        return
-    fi
-    read -rp "New IP Limit (0 = unlimited): " newip
-    read -rp "New GB Limit (e.g. 20 or Unlimited): " newgb
-    read -rp "New Expiry Days (0 = unlimited): " newdays
-
-    sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
-    sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
-    if [[ "$newdays" == "0" ]]; then
-        sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=Unlimited/" "$conf"
-    else
-        local new_exp
-        new_exp=$(date -d "+$newdays days" +"%Y-%m-%d" 2>/dev/null || date -v+${newdays}d +"%Y-%m-%d")
-        sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=${new_exp}/" "$conf"
-    fi
-    v2ray_unlock_user "$uname"
-    echo -e "${GREEN}[SUCCESS] V2Ray account updated & unlocked.${NC}"
-    press_any_key
-}
-
 v2ray_menu() {
-    while true; do
-        clear
-        echo -e "${CYAN}====================================================${NC}"
-        echo -e "${YELLOW}          V2RAY / XRAY MANAGEMENT                  ${NC}"
-        echo -e "${CYAN}====================================================${NC}"
-        echo -e " 1) Add V2Ray User"
-        echo -e " 2) Delete V2Ray User"
-        echo -e " 3) List V2Ray Accounts & GB Limits"
-        echo -e " 4) Check V2Ray Connected Real IPs"
-        echo -e " 5) Extend / Modify Limits (IP / GB / Expiry)"
-        echo -e " 6) Back to Main Menu"
-        echo -e "${CYAN}====================================================${NC}"
-        read -rp "Option [1-6]: " v_opt
-        case $v_opt in
-            1) v2ray_add_user_flow ;;
-            2) v2ray_delete_user_flow ;;
-            3) v2ray_list_users ;;
-            4) v2ray_check_online_ips ;;
-            5) v2ray_modify_limits ;;
-            6) return ;;
-        esac
-    done
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}          V2RAY / XRAY MANAGEMENT                  ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e " 1) Add V2Ray User (Auto UUID or Custom + BadVPN)"
+    echo -e " 2) Delete V2Ray User"
+    echo -e " 3) List V2Ray Users"
+    echo -e " 4) Back"
+    echo -e "${CYAN}====================================================${NC}"
+    read -rp "Option [1-4]: " v_opt
+    case $v_opt in
+        1) v2ray_add_user_flow ;;
+        2) v2ray_delete_user_flow ;;
+        3)
+            clear
+            echo -e "${CYAN}--- Active V2Ray Users ---${NC}"
+            v2ray_list_users
+            press_any_key
+            ;;
+        4) return ;;
+    esac
 }
 
 ssh_add_user_flow() {
@@ -1339,9 +1334,7 @@ ssh_add_user_flow() {
         return
     fi
 
-    local exp_date
-    exp_date=$(date -d "+$sd days" +"%Y-%m-%d" 2>/dev/null || date -v+${sd}d +"%Y-%m-%d")
-    useradd -e "$exp_date" -s /bin/bash -m "$su" 2>/dev/null || useradd -s /bin/bash -m "$su"
+    useradd -e "$(date -d "+$sd days" +"%Y-%m-%d")" -s /bin/bash -m "$su"
     echo -e "$sp\n$sp" | passwd "$su" &>/dev/null
 
     mkdir -p "$USERS_DIR"
@@ -1353,14 +1346,15 @@ GB_LIMIT=$sgb
 USED_MB=0.0
 U_EOF
 
-    echo -e "\n${GREEN}[SUCCESS] SSH Account Created Successfully!${NC}"
-    echo -e "${CYAN}Username         : ${su}${NC}"
-    echo -e "${CYAN}Password         : ${sp}${NC}"
-    echo -e "${CYAN}Host/IP          : ${MY_DOMAIN}${NC}"
-    echo -e "${CYAN}Direct SSL Port  : 443 (No Payload Required / Stunnel compatible)${NC}"
-    echo -e "${CYAN}Dropbear Port    : 109 / 447${NC}"
-    echo -e "${CYAN}WS Port          : 80 / 8443 (via Nginx -> 2082)${NC}"
-    echo -e "${CYAN}BadVPN Port      : 127.0.0.1:${BADVPN_PORT}${NC}"
+    echo -e "\n${GREEN}[SUCCESS] SSH WS Account Created Successfully!${NC}"
+    echo -e "${CYAN}Username    : ${su}${NC}"
+    echo -e "${CYAN}Password    : ${sp}${NC}"
+    echo -e "${CYAN}Host/IP     : ${MY_DOMAIN}${NC}"
+    echo -e "${CYAN}WS Port     : 80 / 443 (via Nginx -> 2082)${NC}"
+    echo -e "${CYAN}BadVPN Port : 127.0.0.1:${BADVPN_PORT} (Active for Gaming & Calls)${NC}"
+    if systemctl is-active slowdns &>/dev/null; then
+        echo -e "${CYAN}SlowDNS     : Isi username/password se bhi login hoga (NS: $(get_ns_domain), Pubkey: SlowDNS Management > Show Info)${NC}"
+    fi
     echo -e "${CYAN}====================================================${NC}"
     press_any_key
 }
@@ -1374,96 +1368,31 @@ ssh_delete_user_flow() {
 }
 
 ssh_list_users() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}           SSH ACCOUNTS & USAGE INFO               ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    if [[ -d "$USERS_DIR" ]]; then
-        for f in "${USERS_DIR}"/*.conf; do
-            [[ -e "$f" ]] || continue
-            local uname ip gb used exp lockstat
-            uname=$(grep '^USERNAME=' "$f" | cut -d= -f2)
-            ip=$(grep '^IP_LIMIT=' "$f" | cut -d= -f2)
-            gb=$(grep '^GB_LIMIT=' "$f" | cut -d= -f2)
-            used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
-            exp=$(chage -l "$uname" 2>/dev/null | grep "Account expires" | awk -F': ' '{print $2}')
-            lockstat=$(passwd -S "$uname" 2>/dev/null | awk '{print $2}')
-            echo -e " User: ${uname} | IP Limit: ${ip} | GB Limit: ${gb} | Used: ${used} MB | Expires: ${exp:-N/A} | Status: ${lockstat:-N/A}"
-        done
-    else
-        echo "No SSH users found."
-    fi
-    press_any_key
-}
-
-ssh_check_online_ips() {
-    clear
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${YELLOW}     SSH CONNECTED SESSIONS & REAL CLIENT IPs      ${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${BLUE}Active Connected Dropbear Sessions:${NC}"
-    ps aux | grep '[d]ropbear'
-    echo ""
-    echo -e "${BLUE}Recent SSH Auth Logins (Real IP from Pakistan / Client):${NC}"
-    journalctl -u dropbear --no-pager -n 40 2>/dev/null | grep "Password auth succeeded" || echo "No dropbear logs available via journalctl."
-    echo -e "${CYAN}====================================================${NC}"
-    press_any_key
-}
-
-ssh_modify_limits() {
-    clear
-    echo -e "${CYAN}--- Extend / Modify SSH Limits ---${NC}"
-    read -rp "Username: " uname
-    if ! id "$uname" &>/dev/null; then
-        echo -e "${RED}[ERROR] User not found!${NC}"
-        press_any_key
-        return
-    fi
-    local conf="${USERS_DIR}/${uname}.conf"
-    read -rp "New IP Limit (0 = unlimited): " newip
-    read -rp "New GB Limit (e.g. 20 or Unlimited): " newgb
-    read -rp "New Expiry Days (0 = unlimited): " newdays
-
-    if [[ -f "$conf" ]]; then
-        sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
-        sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
-    fi
-
-    if [[ "$newdays" == "0" ]]; then
-        usermod -e "" "$uname" 2>/dev/null || true
-    else
-        local new_exp
-        new_exp=$(date -d "+$newdays days" +"%Y-%m-%d" 2>/dev/null || date -v+${newdays}d +"%Y-%m-%d")
-        usermod -e "$new_exp" "$uname" 2>/dev/null || true
-    fi
-    passwd -u "$uname" &>/dev/null
-    echo -e "${GREEN}[SUCCESS] SSH user limits updated & account unlocked.${NC}"
-    press_any_key
+    ls -l "${USERS_DIR}" 2>/dev/null | awk '{print $9}' | sed 's/\.conf//g'
 }
 
 ssh_menu() {
-    while true; do
-        clear
-        echo -e "${CYAN}====================================================${NC}"
-        echo -e "${YELLOW}      SSH / DROPBEAR / DIRECT SSL MANAGEMENT       ${NC}"
-        echo -e "${CYAN}====================================================${NC}"
-        echo -e " 1) Add SSH Account (Direct SSL 443 + WS)"
-        echo -e " 2) Delete SSH Account"
-        echo -e " 3) List SSH Accounts & GB Limits"
-        echo -e " 4) Check SSH Connected Real IPs"
-        echo -e " 5) Extend / Modify Limits (IP / GB / Expiry)"
-        echo -e " 6) Back to Main Menu"
-        echo -e "${CYAN}====================================================${NC}"
-        read -rp "Option [1-6]: " s_opt
-        case $s_opt in
-            1) ssh_add_user_flow ;;
-            2) ssh_delete_user_flow ;;
-            3) ssh_list_users ;;
-            4) ssh_check_online_ips ;;
-            5) ssh_modify_limits ;;
-            6) return ;;
-        esac
-    done
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}          SSH / DROPBEAR / WS MANAGEMENT           ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e " 1) Add SSH / WS Account (Auth Fixed / Safe Shell)"
+    echo -e " 2) Delete SSH Account"
+    echo -e " 3) List SSH Accounts"
+    echo -e " 4) Back"
+    echo -e "${CYAN}====================================================${NC}"
+    read -rp "Option [1-4]: " s_opt
+    case $s_opt in
+        1) ssh_add_user_flow ;;
+        2) ssh_delete_user_flow ;;
+        3)
+            clear
+            echo -e "${CYAN}--- Active SSH Users ---${NC}"
+            ssh_list_users
+            press_any_key
+            ;;
+        4) return ;;
+    esac
 }
 
 setup_ssl() {
@@ -1471,7 +1400,7 @@ setup_ssl() {
     local current_dom=$(get_domain)
 
     if [[ "$current_dom" == "No Domain Set" || -z "$current_dom" ]]; then
-        echo -e "${RED}[ERROR] Pehle Domain Add karein!${NC}"
+        echo -e "${RED}[ERROR] Pehle Option 2 se Domain Add karein!${NC}"
         press_any_key
         return
     fi
@@ -1480,17 +1409,31 @@ setup_ssl() {
     echo -e "${YELLOW}  ${PANEL_NAME} - ISSUING SSL (${current_dom}) ${NC}"
     echo -e "${CYAN}====================================================${NC}"
 
-    mkdir -p /var/www/html
-    certbot certonly --webroot -w /var/www/html --agree-tos --register-unsafely-without-email -d "$current_dom" --non-interactive
+    rm -f "$WILDCARD_FILE"
+
+    systemctl stop nginx 2>/dev/null
+    certbot certonly --standalone --preferred-challenges http --agree-tos --register-unsafely-without-email -d "$current_dom"
 
     if [[ -f "/etc/letsencrypt/live/$current_dom/fullchain.pem" ]]; then
         echo -e "\n${GREEN}[SUCCESS] SSL Active for ${current_dom}!${NC}"
+        install_renewal_hook
         configure_xray
         configure_nginx_proxy
+        echo -e "${GREEN}[SUCCESS] Nginx reloaded with SSL cert!${NC}"
     else
         echo -e "${RED}[ERROR] SSL Fail ho gaya!${NC}"
     fi
     press_any_key
+}
+
+install_renewal_hook() {
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat << 'HOOK_EOF' > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
+#!/bin/bash
+systemctl restart nginx
+systemctl restart xray
+HOOK_EOF
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
 }
 
 status_check_inline() {
@@ -1503,8 +1446,11 @@ status_check_inline() {
     echo -e " BadVPN UDPGW  : $(systemctl is-active badvpn)"
     echo -e " Xray-core     : $(systemctl is-active xray)"
     echo -e " SlowDNS       : $(systemctl is-active slowdns)"
+    echo -e " Auto-Kill     : $(systemctl is-active autokill)"
     echo -e " Port 80       : $(ss -tln 2>/dev/null | grep -q ':80 ' && echo LISTENING || echo DOWN)"
-    echo -e " Port 443      : $(ss -tln 2>/dev/null | grep -q ':443 ' && echo LISTENING (Direct SSL + SNI) || echo DOWN)"
+    echo -e " Port 443      : $(ss -tln 2>/dev/null | grep -q ':443 ' && echo LISTENING || echo DOWN)"
+    echo -e " UDPGW Port    : $(ss -tln 2>/dev/null | grep -q ':7300 ' && echo LISTENING || echo DOWN)"
+    echo -e " SlowDNS Port  : $(ss -uln 2>/dev/null | grep -q ':53 ' && echo LISTENING || echo DOWN)"
     echo -e "${CYAN}----------------------------------------------------${NC}"
 }
 
@@ -1517,6 +1463,203 @@ status_check() {
     press_any_key
 }
 
+check_connected_ips_option() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}     CONNECTED IPs & ACTIVE ONLINE USERS           ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${BLUE}--- SSH / Dropbear Active Sessions (includes WS & SlowDNS tunnels) ---${NC}"
+    ps aux 2>/dev/null | grep '[d]ropbear'
+    echo ""
+    echo -e "${BLUE}Recent successful SSH logins (last 50 log lines):${NC}"
+    journalctl -u dropbear --no-pager -n 50 2>/dev/null | grep "Password auth succeeded"
+    echo ""
+    echo -e "${BLUE}--- V2Ray / Xray Recent Connections (last 200 access-log lines) ---${NC}"
+    if [[ -f "$XRAY_ACCESS_LOG" ]]; then
+        tail -n 200 "$XRAY_ACCESS_LOG" | grep -oE "from [0-9.]+:[0-9]+ .*email: [A-Za-z0-9_.-]+"
+    else
+        echo -e "${YELLOW}Xray access log abhi maujood nahi. Naya config apply karne ke liye V2Ray/Xray Management se Xray dobara configure/restart karein.${NC}"
+    fi
+    echo -e "${CYAN}====================================================${NC}"
+    press_any_key
+}
+
+check_status_quota_option() {
+    clear
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${YELLOW}     USER STATUS, QUOTA & LIMITS                   ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${BLUE}--- SSH Users ---${NC}"
+    if [[ -d "$USERS_DIR" ]]; then
+        for f in "${USERS_DIR}"/*.conf; do
+            [[ -e "$f" ]] || continue
+            local uname ip gb used exp lockstat
+            uname=$(grep '^USERNAME=' "$f" | cut -d= -f2)
+            ip=$(grep '^IP_LIMIT=' "$f" | cut -d= -f2)
+            gb=$(grep '^GB_LIMIT=' "$f" | cut -d= -f2)
+            used=$(grep '^USED_MB=' "$f" | cut -d= -f2)
+            exp=$(chage -l "$uname" 2>/dev/null | grep "Account expires" | awk -F': ' '{print $2}')
+            lockstat=$(passwd -S "$uname" 2>/dev/null | awk '{print $2}')
+            echo -e " ${uname}: IP_LIMIT=${ip} GB_LIMIT=${gb} USED_MB=${used} EXPIRES=${exp:-N/A} STATUS=${lockstat:-N/A}"
+        done
+    else
+        echo " (koi SSH user nahi mila)"
+    fi
+    echo ""
+    echo -e "${BLUE}--- V2Ray Users ---${NC}"
+    v2ray_list_users
+    echo -e "${CYAN}====================================================${NC}"
+    press_any_key
+}
+
+renew_expiry_option() {
+    clear
+    echo -e "${CYAN}--- Renew Account Expiry ---${NC}"
+    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
+    read -rp "Username: " uname
+    read -rp "New Expiry (Days from today, 0 = unlimited): " days
+
+    if [[ "$at" == "1" ]]; then
+        if ! id "$uname" &>/dev/null; then
+            echo -e "${RED}[ERROR] SSH user nahi mila.${NC}"
+        else
+            if [[ "$days" == "0" ]]; then
+                usermod -e "" "$uname"
+            else
+                usermod -e "$(date -d "+$days days" +"%Y-%m-%d")" "$uname"
+            fi
+            passwd -u "$uname" &>/dev/null
+            echo -e "${GREEN}[SUCCESS] SSH user '${uname}' expiry updated & account unlocked.${NC}"
+        fi
+    elif [[ "$at" == "2" ]]; then
+        local conf="${V2USERS_DIR}/${uname}.conf"
+        if [[ ! -f "$conf" ]]; then
+            echo -e "${RED}[ERROR] V2Ray user nahi mila.${NC}"
+        else
+            if [[ "$days" == "0" ]]; then
+                sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=Unlimited/" "$conf"
+            else
+                sed -i "s/^EXPIRE_DATE=.*/EXPIRE_DATE=$(date -d "+$days days" +"%Y-%m-%d")/" "$conf"
+            fi
+            v2ray_unlock_user "$uname"
+            echo -e "${GREEN}[SUCCESS] V2Ray user '${uname}' expiry updated & auto-unlocked.${NC}"
+        fi
+    else
+        echo -e "${RED}[ERROR] Invalid account type.${NC}"
+    fi
+    press_any_key
+}
+
+modify_ip_limit_option() {
+    clear
+    echo -e "${CYAN}--- Extend / Modify IP Limit (Auto Unlock) ---${NC}"
+    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
+    read -rp "Username: " uname
+    read -rp "New IP Limit (0 = unlimited): " newip
+
+    if [[ "$at" == "1" ]]; then
+        local conf="${USERS_DIR}/${uname}.conf"
+        if [[ ! -f "$conf" ]]; then
+            echo -e "${RED}[ERROR] SSH user conf nahi mila.${NC}"
+        else
+            sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
+            passwd -u "$uname" &>/dev/null
+            echo -e "${GREEN}[SUCCESS] SSH IP limit updated to ${newip} & account auto-unlocked.${NC}"
+        fi
+    elif [[ "$at" == "2" ]]; then
+        local conf="${V2USERS_DIR}/${uname}.conf"
+        if [[ ! -f "$conf" ]]; then
+            echo -e "${RED}[ERROR] V2Ray user conf nahi mila.${NC}"
+        else
+            sed -i "s/^IP_LIMIT=.*/IP_LIMIT=${newip}/" "$conf"
+            v2ray_unlock_user "$uname"
+            echo -e "${GREEN}[SUCCESS] V2Ray IP limit updated to ${newip} & user auto-unlocked.${NC}"
+        fi
+    else
+        echo -e "${RED}[ERROR] Invalid account type.${NC}"
+    fi
+    press_any_key
+}
+
+modify_gb_limit_option() {
+    clear
+    echo -e "${CYAN}--- Extend / Modify GB Data Quota (Auto Unlock) ---${NC}"
+    read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
+    read -rp "Username: " uname
+    read -rp "New GB Limit (e.g. 20 or Unlimited): " newgb
+    read -rp "Reset used-data counter to 0? (y/n): " doreset
+
+    if [[ "$at" == "1" ]]; then
+        local conf="${USERS_DIR}/${uname}.conf"
+        if [[ ! -f "$conf" ]]; then
+            echo -e "${RED}[ERROR] SSH user conf nahi mila.${NC}"
+        else
+            sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
+            [[ "$doreset" == "y" || "$doreset" == "Y" ]] && sed -i "s/^USED_MB=.*/USED_MB=0.0/" "$conf"
+            passwd -u "$uname" &>/dev/null
+            echo -e "${GREEN}[SUCCESS] SSH GB quota updated & account auto-unlocked.${NC}"
+        fi
+    elif [[ "$at" == "2" ]]; then
+        local conf="${V2USERS_DIR}/${uname}.conf"
+        if [[ ! -f "$conf" ]]; then
+            echo -e "${RED}[ERROR] V2Ray user conf nahi mila.${NC}"
+        else
+            sed -i "s/^GB_LIMIT=.*/GB_LIMIT=${newgb}/" "$conf"
+            [[ "$doreset" == "y" || "$doreset" == "Y" ]] && sed -i "s/^USED_MB=.*/USED_MB=0.0/" "$conf"
+            v2ray_unlock_user "$uname"
+            echo -e "${GREEN}[SUCCESS] V2Ray GB quota updated & user auto-unlocked.${NC}"
+        fi
+    else
+        echo -e "${RED}[ERROR] Invalid account type.${NC}"
+    fi
+    press_any_key
+}
+
+user_management_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}====================================================${NC}"
+        echo -e "${YELLOW}       RareTriccks VPN Panel - USER MANAGEMENT     ${NC}"
+        echo -e "${CYAN}====================================================${NC}"
+        echo -e " 1) Add New User"
+        echo -e " 2) Delete User"
+        echo -e " 3) Check Connected IPs & Active Online Users"
+        echo -e " 4) Check User Status, Quota & Limits"
+        echo -e " 5) Renew Account Expiry Days"
+        echo -e " 6) Extend / Modify IP Limit (Auto Unlock)"
+        echo -e " 7) Extend / Modify GB Data Quota (Auto Unlock)"
+        echo -e " 8) Back to Main Menu"
+        echo -e "${CYAN}====================================================${NC}"
+        read -rp "Select Option [1-8]: " u_opt
+
+        case $u_opt in
+            1)
+                read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
+                case "$at" in
+                    1) ssh_add_user_flow ;;
+                    2) v2ray_add_user_flow ;;
+                    *) echo -e "${RED}Invalid type.${NC}"; press_any_key ;;
+                esac
+                ;;
+            2)
+                read -rp "Account Type (1=SSH/SlowDNS, 2=V2Ray): " at
+                case "$at" in
+                    1) ssh_delete_user_flow ;;
+                    2) v2ray_delete_user_flow ;;
+                    *) echo -e "${RED}Invalid type.${NC}"; press_any_key ;;
+                esac
+                ;;
+            3) check_connected_ips_option ;;
+            4) check_status_quota_option ;;
+            5) renew_expiry_option ;;
+            6) modify_ip_limit_option ;;
+            7) modify_gb_limit_option ;;
+            8) return ;;
+            *) echo -e "${RED}Invalid option.${NC}"; press_any_key ;;
+        esac
+    done
+}
+
 uninstall_panel() {
     clear
     read -rp "Confirm karne ke liye 'YES' likhein: " confirm
@@ -1526,7 +1669,7 @@ uninstall_panel() {
     systemctl disable ws-proxy autokill dropbear nginx xray badvpn slowdns 2>/dev/null
     rm -f /etc/systemd/system/ws-proxy.service /etc/systemd/system/autokill.service /etc/systemd/system/badvpn.service /etc/systemd/system/slowdns.service
     rm -f /usr/local/bin/ws-proxy.py /usr/local/bin/autokill.py /usr/local/bin/badvpn-udpgw /usr/local/bin/dns-server
-    rm -f "$NGINX_CONF" "$NGINX_STREAM_CONF" "$XRAY_CONFIG"
+    rm -f "$NGINX_CONF" "$XRAY_CONFIG"
     rm -rf /etc/raretriccks /etc/slowdns
     echo -e "${GREEN}[SUCCESS] Uninstall complete.${NC}"
     exit 0
@@ -1542,26 +1685,28 @@ while true; do
     echo -e " Domain Target: ${YELLOW}${CURRENT_DOM}${NC}"
     echo -e "${CYAN}----------------------------------------------------${NC}"
     echo -e " 1) Auto Install System Components (BadVPN Built-in)"
-    echo -e " 2) Add / Change Domain Name Main Menu"
+    echo -e " 2) Add / Change Domain Name"
     echo -e " 3) Issue SSL Certificate (Let's Encrypt)"
-    echo -e " 4) SSH / Direct SSL Management Menu"
-    echo -e " 5) V2Ray / Xray Management Menu"
+    echo -e " 4) V2Ray / Xray Management (WS)"
+    echo -e " 5) SSH / WS Account Management"
     echo -e " 6) SlowDNS Management (SSH over DNS)"
-    echo -e " 7) Check Status & Service Ports"
-    echo -e " 8) Uninstall Panel"
-    echo -e " 9) Exit Panel"
+    echo -e " 7) User Management (Add/Delete/IPs/Quota/Expiry)"
+    echo -e " 8) Check Status & Ports"
+    echo -e " 9) Uninstall Panel"
+    echo -e " 10) Exit Panel"
     echo -e "${CYAN}====================================================${NC}"
-    read -rp "Select Option [1-9]: " opt
+    read -rp "Select Option [1-10]: " opt
 
     case $opt in
         1) install_all_components ;;
         2) add_domain_option ;;
         3) setup_ssl ;;
-        4) ssh_menu ;;
-        5) v2ray_menu ;;
+        4) v2ray_menu ;;
+        5) ssh_menu ;;
         6) slowdns_menu ;;
-        7) status_check ;;
-        8) uninstall_panel ;;
-        9) exit 0 ;;
+        7) user_management_menu ;;
+        8) status_check ;;
+        9) uninstall_panel ;;
+        10) exit 0 ;;
     esac
 done
