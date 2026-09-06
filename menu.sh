@@ -1447,7 +1447,12 @@ setup_ssl() {
         install_renewal_hook
         configure_xray
         configure_nginx_proxy
-        echo -e "${GREEN}[SUCCESS] Nginx reloaded with SSL cert!${NC}"
+        echo -e "${CYAN}----------------------------------------------------${NC}"
+        if systemctl is-active nginx &>/dev/null; then
+            echo -e "${GREEN}[SUCCESS] Nginx reloaded with SSL cert & is running fine.${NC}"
+        else
+            echo -e "${RED}[ERROR] Nginx SSL cert ke saath reload nahi ho saka! 'journalctl -xeu nginx' check karein.${NC}"
+        fi
     else
         echo -e "${RED}[ERROR] SSL Fail ho gaya!${NC}"
     fi
@@ -1458,8 +1463,18 @@ install_renewal_hook() {
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat << 'HOOK_EOF' > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
 #!/bin/bash
-systemctl restart nginx
-systemctl restart xray
+# Only restart nginx if its config is actually valid right now.
+# During a fresh 'Issue SSL Certificate' run, this hook fires WHILE nginx is
+# deliberately stopped (standalone challenge) and BEFORE the panel has written
+# the new TLS server block - restarting here would fail and print a scary
+# (but harmless) error. The panel reconfigures + restarts nginx itself right
+# after certbot returns, so this hook only needs to matter on real renewals,
+# when nginx is already running with a valid config.
+if nginx -t &>/dev/null; then
+    systemctl restart nginx
+fi
+systemctl restart xray 2>/dev/null
+systemctl restart slowdns 2>/dev/null
 HOOK_EOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
 }
